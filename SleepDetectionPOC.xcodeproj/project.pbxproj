@@ -1,0 +1,594 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		00ED5041FEC1575FBA3EACCD /* RouteEngines.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83D6CE62CAA884F3DE722335 /* RouteEngines.swift */; };
+		0E9A6899DAC9146D426F32BB /* MonitorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3DEAD38B98A8A9EB4AEE2DC /* MonitorView.swift */; };
+		0F0902E81070846BBCC6DE26 /* SleepDetectionPOCTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EBE18D14DE886B9AA83F6E6 /* SleepDetectionPOCTests.swift */; };
+		1B939E4A814CBA004C3C5BF8 /* ExportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 531AF714B00D2AA2FCE146D8 /* ExportView.swift */; };
+		251C518D402B328D7AAC4DFA /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9B579DC61956E38916DC05E /* SettingsView.swift */; };
+		68E03A936C2C2A092F6ECB7A /* Formatters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C5556F275F024E5E0CDB83 /* Formatters.swift */; };
+		76B9AA99A6624E8459F605FA /* SleepDetectionPOCApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0E3C7D7CBCE5C06A824F626 /* SleepDetectionPOCApp.swift */; };
+		8338AD17549394331FAE2403 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D665EF611E226CBD0013DC /* Settings.swift */; };
+		956A994A530862A2B54B4E33 /* SensorProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F65EA13E17C3547FAF2DAB8 /* SensorProviders.swift */; };
+		AD1499F3FCA90BE3FAF29078 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99FAB824F7DB2886E85246B6 /* Models.swift */; };
+		B1066678D6FB03D166970780 /* SessionAnalytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05E841F7C2AD04072EB9682D /* SessionAnalytics.swift */; };
+		B87AEDCC9A3D004DFEDB5A45 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0032DEE2BBB85F3A51C0F85E /* AppModel.swift */; };
+		D4FCEA0AA596534D22DA820D /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202B8C752C800E6957324305 /* HomeView.swift */; };
+		DC04CE7C0277241573BB9E6C /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65E12E4CF1151D1323BEE3FC /* HistoryView.swift */; };
+		EBDE434DB36912E12A6A22E6 /* HealthKitServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0AE056A3CA51F045F22C110 /* HealthKitServices.swift */; };
+		EEE15A07F8BA851F8EABB01A /* FileSessionRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D32F56B2C7B1210600D9819 /* FileSessionRepository.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		0B29F0384E3B147A5DBE93DF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 91EE9BE3B01933959675F66C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1D91BBBCDC789F7F34156E8F;
+			remoteInfo = SleepDetectionPOC;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0032DEE2BBB85F3A51C0F85E /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		05E841F7C2AD04072EB9682D /* SessionAnalytics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAnalytics.swift; sourceTree = "<group>"; };
+		1D32F56B2C7B1210600D9819 /* FileSessionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSessionRepository.swift; sourceTree = "<group>"; };
+		202B8C752C800E6957324305 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		21C143B040E14D3F63097B93 /* SleepDetectionPOC.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SleepDetectionPOC.entitlements; sourceTree = "<group>"; };
+		43C5556F275F024E5E0CDB83 /* Formatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Formatters.swift; sourceTree = "<group>"; };
+		4954FA40E6A36B8182C8E180 /* SleepDetectionPOCTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SleepDetectionPOCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SleepDetectionPOC.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		531AF714B00D2AA2FCE146D8 /* ExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportView.swift; sourceTree = "<group>"; };
+		5F65EA13E17C3547FAF2DAB8 /* SensorProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorProviders.swift; sourceTree = "<group>"; };
+		65E12E4CF1151D1323BEE3FC /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
+		82D665EF611E226CBD0013DC /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		83D6CE62CAA884F3DE722335 /* RouteEngines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteEngines.swift; sourceTree = "<group>"; };
+		99FAB824F7DB2886E85246B6 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		9EBE18D14DE886B9AA83F6E6 /* SleepDetectionPOCTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepDetectionPOCTests.swift; sourceTree = "<group>"; };
+		A3DEAD38B98A8A9EB4AEE2DC /* MonitorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorView.swift; sourceTree = "<group>"; };
+		B9B579DC61956E38916DC05E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F0AE056A3CA51F045F22C110 /* HealthKitServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitServices.swift; sourceTree = "<group>"; };
+		F0E3C7D7CBCE5C06A824F626 /* SleepDetectionPOCApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepDetectionPOCApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		052717C97808092DFAADEE01 /* Monitor */ = {
+			isa = PBXGroup;
+			children = (
+				A3DEAD38B98A8A9EB4AEE2DC /* MonitorView.swift */,
+			);
+			path = Monitor;
+			sourceTree = "<group>";
+		};
+		2E0047B5694E9D156F11882C /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				6C0BD462105098E9A26DA250 /* Export */,
+				5F9778B559869BA43AC3953B /* History */,
+				E823FE1298DA94B0680E9A2D /* Home */,
+				052717C97808092DFAADEE01 /* Monitor */,
+				CCEFB00D79A7A4E67F4A164E /* Settings */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		45215FDD9C03F1CCB2B1E398 /* Utilities */ = {
+			isa = PBXGroup;
+			children = (
+				43C5556F275F024E5E0CDB83 /* Formatters.swift */,
+			);
+			path = Utilities;
+			sourceTree = "<group>";
+		};
+		4714832DEB127A438304E3A9 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				8681057E19BDBE2F644DBE5C /* Domain */,
+				BD5B390C17D76F7DC2CDED95 /* Providers */,
+				E24A291D4790644F4128BE20 /* Routes */,
+				F2FAF469B5D2DAFE911460E3 /* Services */,
+				CB7260575FC82565D311E641 /* Storage */,
+				45215FDD9C03F1CCB2B1E398 /* Utilities */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		5F9778B559869BA43AC3953B /* History */ = {
+			isa = PBXGroup;
+			children = (
+				65E12E4CF1151D1323BEE3FC /* HistoryView.swift */,
+			);
+			path = History;
+			sourceTree = "<group>";
+		};
+		60645454ED70DB6FB06290F9 /* SleepDetectionPOC */ = {
+			isa = PBXGroup;
+			children = (
+				CB8EF52070D6424E82A0241E /* App */,
+				4714832DEB127A438304E3A9 /* Core */,
+				2E0047B5694E9D156F11882C /* Features */,
+				D5BC061402D0DCADE5C3A1DA /* Resources */,
+			);
+			path = SleepDetectionPOC;
+			sourceTree = "<group>";
+		};
+		6C0BD462105098E9A26DA250 /* Export */ = {
+			isa = PBXGroup;
+			children = (
+				531AF714B00D2AA2FCE146D8 /* ExportView.swift */,
+			);
+			path = Export;
+			sourceTree = "<group>";
+		};
+		8681057E19BDBE2F644DBE5C /* Domain */ = {
+			isa = PBXGroup;
+			children = (
+				99FAB824F7DB2886E85246B6 /* Models.swift */,
+				82D665EF611E226CBD0013DC /* Settings.swift */,
+			);
+			path = Domain;
+			sourceTree = "<group>";
+		};
+		B93ECCB4BED4C8A36A66A7B2 /* SleepDetectionPOCTests */ = {
+			isa = PBXGroup;
+			children = (
+				9EBE18D14DE886B9AA83F6E6 /* SleepDetectionPOCTests.swift */,
+			);
+			path = SleepDetectionPOCTests;
+			sourceTree = "<group>";
+		};
+		BA1920A7901207B4153ED867 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */,
+				4954FA40E6A36B8182C8E180 /* SleepDetectionPOCTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		BD5B390C17D76F7DC2CDED95 /* Providers */ = {
+			isa = PBXGroup;
+			children = (
+				5F65EA13E17C3547FAF2DAB8 /* SensorProviders.swift */,
+			);
+			path = Providers;
+			sourceTree = "<group>";
+		};
+		CB7260575FC82565D311E641 /* Storage */ = {
+			isa = PBXGroup;
+			children = (
+				1D32F56B2C7B1210600D9819 /* FileSessionRepository.swift */,
+			);
+			path = Storage;
+			sourceTree = "<group>";
+		};
+		CB8EF52070D6424E82A0241E /* App */ = {
+			isa = PBXGroup;
+			children = (
+				0032DEE2BBB85F3A51C0F85E /* AppModel.swift */,
+				F0E3C7D7CBCE5C06A824F626 /* SleepDetectionPOCApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		CCEFB00D79A7A4E67F4A164E /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				B9B579DC61956E38916DC05E /* SettingsView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		D5BC061402D0DCADE5C3A1DA /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				21C143B040E14D3F63097B93 /* SleepDetectionPOC.entitlements */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		E24A291D4790644F4128BE20 /* Routes */ = {
+			isa = PBXGroup;
+			children = (
+				83D6CE62CAA884F3DE722335 /* RouteEngines.swift */,
+			);
+			path = Routes;
+			sourceTree = "<group>";
+		};
+		E823FE1298DA94B0680E9A2D /* Home */ = {
+			isa = PBXGroup;
+			children = (
+				202B8C752C800E6957324305 /* HomeView.swift */,
+			);
+			path = Home;
+			sourceTree = "<group>";
+		};
+		F2FAF469B5D2DAFE911460E3 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				F0AE056A3CA51F045F22C110 /* HealthKitServices.swift */,
+				05E841F7C2AD04072EB9682D /* SessionAnalytics.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		FB9934B93C8AC580EB6519B7 = {
+			isa = PBXGroup;
+			children = (
+				60645454ED70DB6FB06290F9 /* SleepDetectionPOC */,
+				B93ECCB4BED4C8A36A66A7B2 /* SleepDetectionPOCTests */,
+				BA1920A7901207B4153ED867 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1D91BBBCDC789F7F34156E8F /* SleepDetectionPOC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5F0EADF320FAAC44DFB6D4D6 /* Build configuration list for PBXNativeTarget "SleepDetectionPOC" */;
+			buildPhases = (
+				35FA2A988A523F8B5BCC088E /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SleepDetectionPOC;
+			packageProductDependencies = (
+			);
+			productName = SleepDetectionPOC;
+			productReference = 4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E35B80ABEB8347899F6F3DA3 /* SleepDetectionPOCTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 88F9A4AEFA43B868FE52AF9D /* Build configuration list for PBXNativeTarget "SleepDetectionPOCTests" */;
+			buildPhases = (
+				E64756AA2CCA0DAE50FACD0D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5D45B8220F443ECFABB211EF /* PBXTargetDependency */,
+			);
+			name = SleepDetectionPOCTests;
+			packageProductDependencies = (
+			);
+			productName = SleepDetectionPOCTests;
+			productReference = 4954FA40E6A36B8182C8E180 /* SleepDetectionPOCTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		91EE9BE3B01933959675F66C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					1D91BBBCDC789F7F34156E8F = {
+						DevelopmentTeam = "";
+					};
+					E35B80ABEB8347899F6F3DA3 = {
+						DevelopmentTeam = "";
+					};
+				};
+			};
+			buildConfigurationList = E17FF84226AF9A6FECF0FB47 /* Build configuration list for PBXProject "SleepDetectionPOC" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = FB9934B93C8AC580EB6519B7;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1D91BBBCDC789F7F34156E8F /* SleepDetectionPOC */,
+				E35B80ABEB8347899F6F3DA3 /* SleepDetectionPOCTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		35FA2A988A523F8B5BCC088E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B87AEDCC9A3D004DFEDB5A45 /* AppModel.swift in Sources */,
+				1B939E4A814CBA004C3C5BF8 /* ExportView.swift in Sources */,
+				EEE15A07F8BA851F8EABB01A /* FileSessionRepository.swift in Sources */,
+				68E03A936C2C2A092F6ECB7A /* Formatters.swift in Sources */,
+				EBDE434DB36912E12A6A22E6 /* HealthKitServices.swift in Sources */,
+				DC04CE7C0277241573BB9E6C /* HistoryView.swift in Sources */,
+				D4FCEA0AA596534D22DA820D /* HomeView.swift in Sources */,
+				AD1499F3FCA90BE3FAF29078 /* Models.swift in Sources */,
+				0E9A6899DAC9146D426F32BB /* MonitorView.swift in Sources */,
+				00ED5041FEC1575FBA3EACCD /* RouteEngines.swift in Sources */,
+				956A994A530862A2B54B4E33 /* SensorProviders.swift in Sources */,
+				B1066678D6FB03D166970780 /* SessionAnalytics.swift in Sources */,
+				8338AD17549394331FAE2403 /* Settings.swift in Sources */,
+				251C518D402B328D7AAC4DFA /* SettingsView.swift in Sources */,
+				76B9AA99A6624E8459F605FA /* SleepDetectionPOCApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E64756AA2CCA0DAE50FACD0D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0F0902E81070846BBCC6DE26 /* SleepDetectionPOCTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5D45B8220F443ECFABB211EF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1D91BBBCDC789F7F34156E8F /* SleepDetectionPOC */;
+			targetProxy = 0B29F0384E3B147A5DBE93DF /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		08EFDB3E5361D2E73DACE469 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOCTests;
+				PRODUCT_MODULE_NAME = SleepDetectionPOCTests;
+				PRODUCT_NAME = SleepDetectionPOCTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SleepDetectionPOC.app/SleepDetectionPOC";
+			};
+			name = Release;
+		};
+		208ED05238B928FA4E02FA6F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOCTests;
+				PRODUCT_MODULE_NAME = SleepDetectionPOCTests;
+				PRODUCT_NAME = SleepDetectionPOCTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SleepDetectionPOC.app/SleepDetectionPOC";
+			};
+			name = Debug;
+		};
+		2EA1FD513BC58860E0FA3C32 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = SleepDetectionPOC/Resources/SleepDetectionPOC.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = SleepDetectionPOC;
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetectionPOC reads your sleep and heart-rate history to evaluate sleep-onset predictions.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SleepDetectionPOC may analyze local audio features for later POC phases without saving raw audio.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetectionPOC reads motion signals during a recording session to estimate sleep onset.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOC;
+				PRODUCT_MODULE_NAME = SleepDetectionPOC;
+				PRODUCT_NAME = SleepDetectionPOC;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		6BFA94FD4E91405D9E475D2E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		7D48AA684F90A0B3EC677AF7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = SleepDetectionPOC/Resources/SleepDetectionPOC.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = SleepDetectionPOC;
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetectionPOC reads your sleep and heart-rate history to evaluate sleep-onset predictions.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SleepDetectionPOC may analyze local audio features for later POC phases without saving raw audio.";
+				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetectionPOC reads motion signals during a recording session to estimate sleep onset.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOC;
+				PRODUCT_MODULE_NAME = SleepDetectionPOC;
+				PRODUCT_NAME = SleepDetectionPOC;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		DB2DD7494EF1AF5CCF50EE5F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5F0EADF320FAAC44DFB6D4D6 /* Build configuration list for PBXNativeTarget "SleepDetectionPOC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2EA1FD513BC58860E0FA3C32 /* Debug */,
+				7D48AA684F90A0B3EC677AF7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		88F9A4AEFA43B868FE52AF9D /* Build configuration list for PBXNativeTarget "SleepDetectionPOCTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				208ED05238B928FA4E02FA6F /* Debug */,
+				08EFDB3E5361D2E73DACE469 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E17FF84226AF9A6FECF0FB47 /* Build configuration list for PBXProject "SleepDetectionPOC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DB2DD7494EF1AF5CCF50EE5F /* Debug */,
+				6BFA94FD4E91405D9E475D2E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 91EE9BE3B01933959675F66C /* Project object */;
+}

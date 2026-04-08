@@ -1,0 +1,46 @@
+name: SleepDetectionPOC
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    MARKETING_VERSION: 0.1.0
+    CURRENT_PROJECT_VERSION: 1
+    DEVELOPMENT_TEAM: ""
+targets:
+  SleepDetectionPOC:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: SleepDetectionPOC
+    settings:
+      base:
+        PRODUCT_NAME: SleepDetectionPOC
+        PRODUCT_MODULE_NAME: SleepDetectionPOC
+        PRODUCT_BUNDLE_IDENTIFIER: com.rickluo.SleepDetectionPOC
+        INFOPLIST_KEY_CFBundleDisplayName: SleepDetectionPOC
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_NSHealthShareUsageDescription: SleepDetectionPOC reads your sleep and heart-rate history to evaluate sleep-onset predictions.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: SleepDetectionPOC may analyze local audio features for later POC phases without saving raw audio.
+        INFOPLIST_KEY_NSMotionUsageDescription: SleepDetectionPOC reads motion signals during a recording session to estimate sleep onset.
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: SleepDetectionPOC/Resources/SleepDetectionPOC.entitlements
+    scheme:
+      testTargets:
+        - SleepDetectionPOCTests
+  SleepDetectionPOCTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: SleepDetectionPOCTests
+    dependencies:
+      - target: SleepDetectionPOC
+    settings:
+      base:
+        PRODUCT_NAME: SleepDetectionPOCTests
+        PRODUCT_MODULE_NAME: SleepDetectionPOCTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.rickluo.SleepDetectionPOCTests
+        GENERATE_INFOPLIST_FILE: YES

@@ -1,1 +1,5 @@
 入睡检测方案简述.pdf
+.DS_Store
+DerivedData/
+*.xcuserstate
+xcuserdata/
