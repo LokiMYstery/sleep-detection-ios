@@ -134,6 +134,40 @@ struct RouteDParameters: Codable, Equatable, Sendable {
     )
 }
 
+struct RouteEParameters: Codable, Equatable, Sendable {
+    var wristStillThreshold: Double
+    var wristStillWindowCount: Int
+    var wristActiveThreshold: Double
+    var hrConfirmSampleCount: Int
+    var hrTrendMinSamples: Int
+    var hrTrendWindowMinutes: Double
+    var hrSlopeThreshold: Double
+    var hrTrendWindowCount: Int
+    var interactionQuietThresholdMinutes: Double
+    var candidateWindowCount: Int
+    var confirmWindowCount: Int
+    var extendedConfirmWindowCount: Int
+    var watchFreshnessMinutes: Double
+    var disconnectGraceMinutes: Double
+
+    static let `default` = RouteEParameters(
+        wristStillThreshold: 0.015,
+        wristStillWindowCount: 2,
+        wristActiveThreshold: 0.1,
+        hrConfirmSampleCount: 2,
+        hrTrendMinSamples: 3,
+        hrTrendWindowMinutes: 20,
+        hrSlopeThreshold: -0.3,
+        hrTrendWindowCount: 2,
+        interactionQuietThresholdMinutes: 5,
+        candidateWindowCount: 2,
+        confirmWindowCount: 3,
+        extendedConfirmWindowCount: 5,
+        watchFreshnessMinutes: 3,
+        disconnectGraceMinutes: 5
+    )
+}
+
 struct ExperimentSettings: Codable, Equatable, Sendable {
     var targetBedtime: ClockTime
     var estimatedLatency: LatencyBucket
@@ -144,6 +178,7 @@ struct ExperimentSettings: Codable, Equatable, Sendable {
     var routeBParameters: RouteBParameters
     var routeCParameters: RouteCParameters
     var routeDParameters: RouteDParameters
+    var routeEParameters: RouteEParameters
     var disableHealthKitPriors: Bool
     var disableMicrophoneFeatures: Bool
 
@@ -157,6 +192,7 @@ struct ExperimentSettings: Codable, Equatable, Sendable {
         routeBParameters: .default,
         routeCParameters: .default,
         routeDParameters: .default,
+        routeEParameters: .default,
         disableHealthKitPriors: false,
         disableMicrophoneFeatures: false
     )

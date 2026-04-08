@@ -128,12 +128,41 @@ struct WatchFeatures: Codable, Equatable, Sendable {
     var dataQuality: DataQuality
 }
 
+struct WatchConnectivitySnapshot: Codable, Equatable, Sendable {
+    var isSupported: Bool
+    var isPaired: Bool
+    var isReachable: Bool
+    var isWatchAppInstalled: Bool
+    var lastMessageAt: Date?
+    var pendingWindowCount: Int
+}
+
+struct WatchSyncCommand: Codable, Equatable, Sendable {
+    enum Command: String, Codable, Sendable {
+        case startSession
+        case stopSession
+    }
+
+    var command: Command
+    var sessionId: UUID
+    var sessionStartTime: Date
+    var requestedAt: Date
+    var sessionDuration: TimeInterval
+    var preferredWindowDuration: TimeInterval
+}
+
 struct FeatureWindow: Codable, Equatable, Identifiable, Sendable {
-    var id: Int { windowId }
+    enum Source: String, Codable, Sendable {
+        case iphone
+        case watch
+    }
+
+    var id: String { "\(source.rawValue)-\(windowId)-\(endTime.timeIntervalSince1970)" }
     var windowId: Int
     var startTime: Date
     var endTime: Date
     var duration: TimeInterval
+    var source: Source
     var motion: MotionFeatures?
     var audio: AudioFeatures?
     var interaction: InteractionFeatures?
@@ -275,14 +304,17 @@ struct WatchWindowPayload: Codable, Equatable, Sendable {
         var bpm: Double
     }
 
+    var sessionId: UUID
     var windowId: Int
     var startTime: Date
     var endTime: Date
+    var sentAt: Date
+    var isBackfilled: Bool
     var wristAccelRMS: Double
     var wristStillDuration: TimeInterval
     var heartRate: Double?
     var heartRateSamples: [HRSample]
-    var dataQuality: String
+    var dataQuality: WatchFeatures.DataQuality
 }
 
 struct StoredPredictions: Codable, Equatable, Sendable {
@@ -338,7 +370,7 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
     }
 
     var comparisonRouteIds: [RouteId] {
-        [.A, .B, .C, .D]
+        [.A, .B, .C, .D, .E]
     }
 }
 

@@ -333,6 +333,7 @@ actor LiveExportService: ExportService {
             "routeB_prediction", "routeB_error_min",
             "routeC_prediction", "routeC_error_min",
             "routeD_prediction", "routeD_error_min",
+            "routeE_prediction", "routeE_error_min",
             "healthkit_sleep_onset", "sample_quality"
         ].joined(separator: ",")
 
@@ -343,10 +344,12 @@ actor LiveExportService: ExportService {
             let bPrediction = predictions[.B]?.predictedSleepOnset?.csvTimestamp ?? ""
             let cPrediction = predictions[.C]?.predictedSleepOnset?.csvTimestamp ?? ""
             let dPrediction = predictions[.D]?.predictedSleepOnset?.csvTimestamp ?? ""
+            let ePrediction = predictions[.E]?.predictedSleepOnset?.csvTimestamp ?? ""
             let aError = truth?.errors["A"]?.errorMinutes.description ?? ""
             let bError = truth?.errors["B"]?.errorMinutes.description ?? ""
             let cError = truth?.errors["C"]?.errorMinutes.description ?? ""
             let dError = truth?.errors["D"]?.errorMinutes.description ?? ""
+            let eError = truth?.errors["E"]?.errorMinutes.description ?? ""
             let truthTime = truth?.healthKitSleepOnset?.csvTimestamp ?? ""
             return [
                 bundle.session.date,
@@ -361,6 +364,8 @@ actor LiveExportService: ExportService {
                 cError,
                 dPrediction,
                 dError,
+                ePrediction,
+                eError,
                 truthTime,
                 bundle.sampleQuality.rawValue
             ].joined(separator: ",")

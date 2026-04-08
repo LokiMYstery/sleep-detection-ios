@@ -36,9 +36,11 @@ final class AppModel: ObservableObject {
 
     private var routeRunner: RouteRunner?
     private var recordingTask: Task<Void, Never>?
+    private var watchPollingTask: Task<Void, Never>?
     private var eventSubscriptionID: UUID?
     private var nextWindowId = 0
     private var lastWindowBoundary: Date?
+    private var lastWatchReachable: Bool?
     private var hasBootstrapped = false
 
     init(
@@ -48,7 +50,7 @@ final class AppModel: ObservableObject {
         motionProvider: LiveMotionProvider = LiveMotionProvider(),
         interactionProvider: LiveInteractionProvider = LiveInteractionProvider(),
         audioProvider: AudioProvider = LiveAudioProvider(),
-        watchProvider: WatchProvider = PlaceholderWatchProvider()
+        watchProvider: WatchProvider = LiveWatchProvider()
     ) {
         self.repository = repository
         self.settingsStore = settingsStore
@@ -132,7 +134,9 @@ final class AppModel: ObservableObject {
         recentWindows = []
         nextWindowId = 0
         lastWindowBoundary = start
+        lastWatchReachable = deviceCondition.watchReachable
         eventBus.reset()
+        updateWatchConnectivityState()
 
         let runner = RouteRunner(engines: makeRouteEngines())
         routeRunner = runner
@@ -154,6 +158,14 @@ final class AppModel: ObservableObject {
                 await self.flushCurrentWindow(final: false)
             }
         }
+
+        watchPollingTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                await self.flushPendingWatchWindows()
+            }
+        }
     }
 
     func stopSession() async {
@@ -161,7 +173,10 @@ final class AppModel: ObservableObject {
 
         recordingTask?.cancel()
         recordingTask = nil
+        watchPollingTask?.cancel()
+        watchPollingTask = nil
 
+        await flushPendingWatchWindows()
         await flushCurrentWindow(final: true)
 
         motionProvider.stop()
@@ -308,6 +323,7 @@ final class AppModel: ObservableObject {
             startTime: start,
             endTime: end,
             duration: duration,
+            source: .iphone,
             motion: motion,
             audio: audio,
             interaction: interaction,
@@ -316,17 +332,65 @@ final class AppModel: ObservableObject {
 
         nextWindowId += 1
         lastWindowBoundary = end
-        recentWindows = Array(([window] + recentWindows).prefix(20))
-
-        try? await repository.appendWindow(window, to: session.sessionId)
-        routeRunner?.process(window: window)
-        activePredictions = routeRunner?.currentPredictions() ?? activePredictions
-        try? await repository.savePredictions(activePredictions, for: session.sessionId)
+        await processWindow(window, sessionId: session.sessionId)
 
         if final, let eventSubscriptionID {
             eventBus.unsubscribe(eventSubscriptionID)
             self.eventSubscriptionID = nil
         }
+    }
+
+    private func flushPendingWatchWindows() async {
+        guard let sessionId = currentSession?.sessionId else { return }
+        let watchWindows = watchProvider.drainPendingWindows()
+        guard !watchWindows.isEmpty else {
+            updateWatchConnectivityState()
+            return
+        }
+
+        for window in watchWindows {
+            await processWindow(window, sessionId: sessionId)
+        }
+        updateWatchConnectivityState()
+    }
+
+    private func processWindow(_ window: FeatureWindow, sessionId: UUID) async {
+        if window.source == .watch, Date().timeIntervalSince(window.endTime) > 4 * 60 {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchDataBackfill",
+                    payload: [
+                        "windowRange": "\(window.startTime.csvTimestamp)->\(window.endTime.csvTimestamp)",
+                        "sampleCount": window.watch?.heartRate.map { _ in "1" } ?? "0"
+                    ]
+                )
+            )
+        }
+        recentWindows = Array(([window] + recentWindows).prefix(20))
+        try? await repository.appendWindow(window, to: sessionId)
+        routeRunner?.process(window: window)
+        activePredictions = routeRunner?.currentPredictions() ?? activePredictions
+        try? await repository.savePredictions(activePredictions, for: sessionId)
+    }
+
+    private func updateWatchConnectivityState() {
+        let connectivity = watchProvider.connectivitySnapshot()
+        if let previous = lastWatchReachable, previous != connectivity.isReachable {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: connectivity.isReachable ? "custom.watchConnected" : "custom.watchDisconnected",
+                    payload: [
+                        "watchReachable": String(connectivity.isReachable),
+                        "dataQuality": connectivity.isReachable ? "good" : "partial"
+                    ]
+                )
+            )
+        }
+        lastWatchReachable = connectivity.isReachable
+        deviceCondition.hasWatch = connectivity.isPaired
+        deviceCondition.watchReachable = connectivity.isReachable
     }
 
     private func makeRouteEngines() -> [RouteEngine] {
@@ -335,7 +399,7 @@ final class AppModel: ObservableObject {
             RouteBEngine(settings: settings),
             RouteCEngine(settings: settings),
             RouteDEngine(settings: settings),
-            PlaceholderRouteEngine(routeId: .E, reason: "Phase 4 watch route placeholder")
+            RouteEEngine(settings: settings)
         ]
     }
 

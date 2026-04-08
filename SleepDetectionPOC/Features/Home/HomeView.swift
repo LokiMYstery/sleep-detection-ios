@@ -53,6 +53,7 @@ struct HomeView: View {
                 LabeledContent("Motion", value: model.deviceCondition.hasMotionAccess ? "Available" : "Unavailable")
                 LabeledContent("Microphone", value: model.deviceCondition.hasMicrophoneAccess ? "Granted" : "Not Granted")
                 LabeledContent("Watch", value: model.deviceCondition.hasWatch ? "Paired" : "Not Paired")
+                LabeledContent("Watch Reachability", value: model.deviceCondition.watchReachable ? "Reachable" : "Disconnected")
             }
 
             Section("Latest Predictions") {

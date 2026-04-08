@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMotion
 import Foundation
 import UIKit
+import WatchConnectivity
 
 struct SensorWindowSnapshot: Sendable {
     var motion: MotionFeatures?
@@ -20,7 +21,10 @@ protocol SensorProvider: AnyObject, Sendable {
 protocol AudioProvider: SensorProvider {
     func consumeWindow(windowDuration: TimeInterval) -> AudioFeatures?
 }
-protocol WatchProvider: SensorProvider {}
+protocol WatchProvider: SensorProvider {
+    func drainPendingWindows() -> [FeatureWindow]
+    func connectivitySnapshot() -> WatchConnectivitySnapshot
+}
 
 final class PlaceholderAudioProvider: AudioProvider, @unchecked Sendable {
     let providerId = "audio.placeholder"
@@ -35,6 +39,17 @@ final class PlaceholderWatchProvider: WatchProvider, @unchecked Sendable {
     func start(session: Session) throws {}
     func stop() {}
     func currentWindow() -> SensorWindowSnapshot? { nil }
+    func drainPendingWindows() -> [FeatureWindow] { [] }
+    func connectivitySnapshot() -> WatchConnectivitySnapshot {
+        WatchConnectivitySnapshot(
+            isSupported: false,
+            isPaired: false,
+            isReachable: false,
+            isWatchAppInstalled: false,
+            lastMessageAt: nil,
+            pendingWindowCount: 0
+        )
+    }
 }
 
 final class HealthKitHistoryProvider: SensorProvider, @unchecked Sendable {
@@ -42,6 +57,308 @@ final class HealthKitHistoryProvider: SensorProvider, @unchecked Sendable {
     func start(session: Session) throws {}
     func stop() {}
     func currentWindow() -> SensorWindowSnapshot? { nil }
+}
+
+final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
+    let providerId = "watch.live"
+
+    private let lock = NSLock()
+    private var activeSessionId: UUID?
+    private var pendingWindows: [FeatureWindow] = []
+    private var deliveredWindowKeys: Set<String> = []
+    private var heartRateSamples: [WatchWindowPayload.HRSample] = []
+    private var latestWatch: WatchFeatures?
+    private var lastMessageAt: Date?
+    private var currentConnectivity = WatchConnectivitySnapshot(
+        isSupported: WCSession.isSupported(),
+        isPaired: false,
+        isReachable: false,
+        isWatchAppInstalled: false,
+        lastMessageAt: nil,
+        pendingWindowCount: 0
+    )
+
+    private lazy var session: WCSession? = {
+        guard WCSession.isSupported() else { return nil }
+        return WCSession.default
+    }()
+
+    override init() {
+        super.init()
+        session?.delegate = self
+        session?.activate()
+        refreshConnectivity()
+    }
+
+    func start(session: Session) throws {
+        lock.lock()
+        activeSessionId = session.sessionId
+        pendingWindows.removeAll()
+        deliveredWindowKeys.removeAll()
+        heartRateSamples.removeAll()
+        latestWatch = nil
+        lock.unlock()
+
+        self.session?.delegate = self
+        self.session?.activate()
+        refreshConnectivity()
+
+        let command = WatchSyncCommand(
+            command: .startSession,
+            sessionId: session.sessionId,
+            sessionStartTime: session.startTime,
+            requestedAt: Date(),
+            sessionDuration: 12 * 60 * 60,
+            preferredWindowDuration: 2 * 60
+        )
+        transmit(command: command)
+    }
+
+    func stop() {
+        let currentSessionId: UUID?
+        lock.lock()
+        currentSessionId = activeSessionId
+        activeSessionId = nil
+        latestWatch = nil
+        heartRateSamples.removeAll()
+        lock.unlock()
+
+        guard let currentSessionId else {
+            refreshConnectivity()
+            return
+        }
+
+        let command = WatchSyncCommand(
+            command: .stopSession,
+            sessionId: currentSessionId,
+            sessionStartTime: Date(),
+            requestedAt: Date(),
+            sessionDuration: 0,
+            preferredWindowDuration: 0
+        )
+        transmit(command: command)
+        refreshConnectivity()
+    }
+
+    func currentWindow() -> SensorWindowSnapshot? {
+        lock.lock()
+        let latestWatch = self.latestWatch
+        lock.unlock()
+        return SensorWindowSnapshot(
+            motion: nil,
+            audio: nil,
+            interaction: nil,
+            watch: latestWatch
+        )
+    }
+
+    func drainPendingWindows() -> [FeatureWindow] {
+        lock.lock()
+        defer { lock.unlock() }
+        let drained = pendingWindows.sorted { lhs, rhs in
+            if lhs.endTime == rhs.endTime {
+                return lhs.windowId < rhs.windowId
+            }
+            return lhs.endTime < rhs.endTime
+        }
+        pendingWindows.removeAll()
+        currentConnectivity.pendingWindowCount = 0
+        return drained
+    }
+
+    func connectivitySnapshot() -> WatchConnectivitySnapshot {
+        refreshConnectivity()
+        lock.lock()
+        defer { lock.unlock() }
+        return currentConnectivity
+    }
+
+    private func transmit(command: WatchSyncCommand) {
+        guard let session else { return }
+        let encoded = try? JSONEncoder.jsonLines.encode(command)
+        guard
+            let encoded,
+            let payload = try? JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        else {
+            return
+        }
+
+        var message = payload
+        message["kind"] = "watchSyncCommand"
+
+        if session.activationState == .activated {
+            try? session.updateApplicationContext(message)
+            session.transferUserInfo(message)
+            if session.isReachable {
+                session.sendMessage(message, replyHandler: nil, errorHandler: nil)
+            }
+        }
+    }
+
+    private func refreshConnectivity() {
+        guard let session else { return }
+        lock.lock()
+        currentConnectivity = WatchConnectivitySnapshot(
+            isSupported: true,
+            isPaired: session.isPaired,
+            isReachable: session.isReachable,
+            isWatchAppInstalled: session.isWatchAppInstalled,
+            lastMessageAt: lastMessageAt,
+            pendingWindowCount: pendingWindows.count
+        )
+        lock.unlock()
+    }
+
+    private func handle(payload: WatchWindowPayload) {
+        let currentSessionId: UUID?
+        lock.lock()
+        currentSessionId = activeSessionId
+        lock.unlock()
+
+        guard payload.sessionId == currentSessionId else { return }
+        let windowKey = "\(payload.sessionId.uuidString)-\(payload.windowId)-\(payload.endTime.timeIntervalSince1970)"
+
+        lock.lock()
+        defer {
+            currentConnectivity.pendingWindowCount = pendingWindows.count
+            currentConnectivity.lastMessageAt = lastMessageAt
+            lock.unlock()
+        }
+
+        guard !deliveredWindowKeys.contains(windowKey) else { return }
+        deliveredWindowKeys.insert(windowKey)
+
+        let freshnessCutoff = payload.endTime.addingTimeInterval(-20 * 60)
+        heartRateSamples.append(contentsOf: payload.heartRateSamples)
+        heartRateSamples = deduplicated(samples: heartRateSamples)
+            .filter { $0.timestamp >= freshnessCutoff }
+
+        let heartRateTrend = Self.computeHeartRateTrend(
+            samples: heartRateSamples,
+            endTime: payload.endTime
+        )
+        let watchFeatures = WatchFeatures(
+            wristAccelRMS: payload.wristAccelRMS,
+            wristStillDuration: payload.wristStillDuration,
+            heartRate: payload.heartRate,
+            heartRateTrend: heartRateTrend,
+            dataQuality: payload.dataQuality
+        )
+
+        latestWatch = watchFeatures
+        lastMessageAt = payload.sentAt
+        pendingWindows.append(
+            FeatureWindow(
+                windowId: payload.windowId,
+                startTime: payload.startTime,
+                endTime: payload.endTime,
+                duration: payload.endTime.timeIntervalSince(payload.startTime),
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: watchFeatures
+            )
+        )
+    }
+
+    private func deduplicated(samples: [WatchWindowPayload.HRSample]) -> [WatchWindowPayload.HRSample] {
+        var seen: Set<String> = []
+        return samples
+            .sorted { $0.timestamp < $1.timestamp }
+            .filter { sample in
+                let key = "\(sample.timestamp.timeIntervalSince1970)-\(sample.bpm)"
+                return seen.insert(key).inserted
+            }
+    }
+
+    private static func computeHeartRateTrend(
+        samples: [WatchWindowPayload.HRSample],
+        endTime: Date
+    ) -> WatchFeatures.HRTrend {
+        let relevantSamples = samples
+            .filter { $0.timestamp <= endTime && $0.timestamp >= endTime.addingTimeInterval(-20 * 60) }
+            .sorted { $0.timestamp < $1.timestamp }
+
+        guard relevantSamples.count >= 3 else { return .insufficient }
+
+        let xValues = relevantSamples.map { $0.timestamp.timeIntervalSince(relevantSamples[0].timestamp) / 60 }
+        let yValues = relevantSamples.map(\.bpm)
+        let count = Double(relevantSamples.count)
+        let sumX = xValues.reduce(0, +)
+        let sumY = yValues.reduce(0, +)
+        let sumXY = zip(xValues, yValues).reduce(0) { $0 + ($1.0 * $1.1) }
+        let sumXX = xValues.reduce(0) { $0 + ($1 * $1) }
+        let denominator = count * sumXX - sumX * sumX
+        guard denominator != 0 else { return .insufficient }
+
+        let slope = (count * sumXY - sumX * sumY) / denominator
+        let meanY = sumY / count
+        let intercept = (sumY - slope * sumX) / count
+        let ssTot = yValues.reduce(0) { $0 + pow($1 - meanY, 2) }
+        let ssRes = zip(xValues, yValues).reduce(0) { partial, pair in
+            let predicted = intercept + slope * pair.0
+            return partial + pow(pair.1 - predicted, 2)
+        }
+        let rSquared = ssTot == 0 ? 1 : max(0, 1 - (ssRes / ssTot))
+
+        if slope <= -0.3, rSquared >= 0.2 {
+            return .dropping
+        }
+        if slope >= 0.3 {
+            return .rising
+        }
+        return .stable
+    }
+}
+
+extension LiveWatchProvider: WCSessionDelegate {
+    func session(
+        _ session: WCSession,
+        activationDidCompleteWith activationState: WCSessionActivationState,
+        error: (any Error)?
+    ) {
+        refreshConnectivity()
+    }
+
+    func sessionDidBecomeInactive(_ session: WCSession) {
+        refreshConnectivity()
+    }
+
+    func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
+        refreshConnectivity()
+    }
+
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        refreshConnectivity()
+    }
+
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
+        handleIncoming(dictionary: applicationContext)
+    }
+
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
+        handleIncoming(dictionary: userInfo)
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        handleIncoming(dictionary: message)
+    }
+
+    private func handleIncoming(dictionary: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: dictionary) else { return }
+        guard let kind = dictionary["kind"] as? String else { return }
+
+        switch kind {
+        case "watchWindowPayload":
+            guard let payload = try? JSONDecoder.iso8601.decode(WatchWindowPayload.self, from: data) else { return }
+            handle(payload: payload)
+            refreshConnectivity()
+        default:
+            refreshConnectivity()
+        }
+    }
 }
 
 final class LiveMotionProvider: SensorProvider, @unchecked Sendable {

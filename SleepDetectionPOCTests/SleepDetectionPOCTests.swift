@@ -56,6 +56,7 @@ struct SleepDetectionPOCTests {
                     startTime: start.addingTimeInterval(Double(index) * 30),
                     endTime: start.addingTimeInterval(Double(index + 1) * 30),
                     duration: 30,
+                    source: .iphone,
                     motion: MotionFeatures(accelRMS: 0.01, peakCount: 0, attitudeChangeRate: 1, maxAccel: 0.02, stillRatio: 0.95, stillDuration: 28),
                     audio: nil,
                     interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 180, screenWakeCount: 0, lastInteractionAt: start),
@@ -74,6 +75,7 @@ struct SleepDetectionPOCTests {
                 startTime: start.addingTimeInterval(120),
                 endTime: start.addingTimeInterval(150),
                 duration: 30,
+                source: .iphone,
                 motion: MotionFeatures(accelRMS: 0.20, peakCount: 4, attitudeChangeRate: 20, maxAccel: 0.4, stillRatio: 0.1, stillDuration: 3),
                 audio: nil,
                 interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 10, screenWakeCount: 1, lastInteractionAt: start.addingTimeInterval(120)),
@@ -271,6 +273,7 @@ struct SleepDetectionPOCTests {
                     startTime: start.addingTimeInterval(Double(index) * 30),
                     endTime: start.addingTimeInterval(Double(index + 1) * 30),
                     duration: 30,
+                    source: .iphone,
                     motion: MotionFeatures(
                         accelRMS: rms,
                         peakCount: rms > 0.02 ? 2 : 0,
@@ -374,6 +377,7 @@ struct SleepDetectionPOCTests {
                     startTime: start.addingTimeInterval(Double(index) * 30),
                     endTime: start.addingTimeInterval(Double(index + 1) * 30),
                     duration: 30,
+                    source: .iphone,
                     motion: MotionFeatures(
                         accelRMS: 0.009,
                         peakCount: 0,
@@ -407,6 +411,110 @@ struct SleepDetectionPOCTests {
         #expect(prediction.evidenceSummary.contains("Confirmed"))
     }
 
+    @Test("Route E confirms from Watch wrist motion and heart rate windows")
+    @MainActor
+    func routeEConfirmsFromWatchFusion() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            hrConfirmSampleCount: 1,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 2,
+            extendedConfirmWindowCount: 2,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let engine = RouteEEngine(settings: settings)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P1,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: 70,
+                sleepHRTarget: 60,
+                hrDropThreshold: 8
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(accelRMS: 0.005, peakCount: 0, attitudeChangeRate: 0, maxAccel: 0.01, stillRatio: 1, stillDuration: 30),
+                audio: nil,
+                interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 180, screenWakeCount: 0, lastInteractionAt: start),
+                watch: nil
+            )
+        )
+
+        for index in 0..<2 {
+            engine.onWindow(
+                FeatureWindow(
+                    windowId: index,
+                    startTime: start.addingTimeInterval(120 + Double(index) * 120),
+                    endTime: start.addingTimeInterval(240 + Double(index) * 120),
+                    duration: 120,
+                    source: .watch,
+                    motion: nil,
+                    audio: nil,
+                    interaction: nil,
+                    watch: WatchFeatures(
+                        wristAccelRMS: 0.01,
+                        wristStillDuration: 240,
+                        heartRate: 58,
+                        heartRateTrend: .dropping,
+                        dataQuality: .good
+                    )
+                )
+            )
+        }
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.isAvailable == true)
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset != nil)
+    }
+
+    @Test("Route E stays unavailable without a paired watch")
+    @MainActor
+    func routeEUnavailableWithoutWatch() async throws {
+        let engine = RouteEEngine(settings: .default)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+
+        engine.start(session: session, priors: PriorSnapshot.empty.routePriors)
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.isAvailable == false)
+        #expect(prediction.evidenceSummary.contains("Watch"))
+    }
+
     @Test("Repository recovers interrupted sessions and ignores bad JSONL tails")
     func repositoryRecovery() async throws {
         let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -425,6 +533,7 @@ struct SleepDetectionPOCTests {
                 startTime: session.startTime,
                 endTime: session.startTime.addingTimeInterval(30),
                 duration: 30,
+                source: .iphone,
                 motion: nil,
                 audio: nil,
                 interaction: nil,

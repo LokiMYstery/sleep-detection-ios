@@ -30,6 +30,9 @@ struct MonitorView: View {
                             .font(.headline)
                         Text("\(window.startTime.formattedDateTime) - \(window.endTime.formattedTime)")
                             .font(.caption)
+                        Text(window.source == .watch ? "Watch window" : "iPhone window")
+                            .font(.caption)
+                            .foregroundStyle(window.source == .watch ? .blue : .secondary)
                         if let motion = window.motion {
                             Text(
                                 "accelRMS \(motion.accelRMS, specifier: "%.3f"), peaks \(motion.peakCount), stillRatio \(motion.stillRatio, specifier: "%.2f")"
@@ -49,6 +52,12 @@ struct MonitorView: View {
                             Text("No audio features in this window")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                        if let watch = window.watch {
+                            Text(
+                                "watch RMS \(watch.wristAccelRMS, specifier: "%.3f"), still \(watch.wristStillDuration, specifier: "%.0f")s, HR \(watch.heartRate.map { String(format: "%.1f", $0) } ?? "-"), trend \(watch.heartRateTrend.rawValue)"
+                            )
+                            .font(.caption)
                         }
                     }
                 }
