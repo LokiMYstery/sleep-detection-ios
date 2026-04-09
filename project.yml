@@ -47,6 +47,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.rickluo.SleepDetectionPOC.watchkitapp
         INFOPLIST_KEY_CFBundleDisplayName: Sleep Watch
         INFOPLIST_KEY_NSHealthShareUsageDescription: SleepDetection watch reads heart-rate samples to evaluate sleep onset.
+        INFOPLIST_KEY_NSHealthUpdateUsageDescription: SleepDetection watch starts a workout session so heart-rate collection can stay active during sleep monitoring.
         INFOPLIST_KEY_NSMotionUsageDescription: SleepDetection watch records wrist motion to estimate sleep onset.
         INFOPLIST_KEY_WKCompanionAppBundleIdentifier: com.rickluo.SleepDetectionPOC
         INFOPLIST_KEY_WKBackgroundModes:
