@@ -168,6 +168,16 @@ struct SettingsView: View {
                 LabeledContent("Motion", value: model.deviceCondition.hasMotionAccess ? "Available" : "Unavailable")
                 LabeledContent("Microphone", value: model.deviceCondition.hasMicrophoneAccess ? "Granted" : "Unavailable")
                 LabeledContent("Watch", value: model.deviceCondition.hasWatch ? "Paired" : "Unavailable")
+                if !model.deviceCondition.hasHealthKitAccess && !model.settings.disableHealthKitPriors {
+                    Button("Request HealthKit Access") {
+                        Task { await model.requestHealthKitAccess() }
+                    }
+                }
+                if !model.deviceCondition.hasMicrophoneAccess && !model.settings.disableMicrophoneFeatures {
+                    Button("Request Microphone Access") {
+                        Task { await model.requestMicrophoneAccess() }
+                    }
+                }
             }
         }
         .navigationTitle("Settings")

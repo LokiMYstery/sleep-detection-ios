@@ -4,12 +4,16 @@ import Foundation
 import UIKit
 import WatchConnectivity
 
+// MARK: - Types
+
 struct SensorWindowSnapshot: Sendable {
     var motion: MotionFeatures?
     var audio: AudioFeatures?
     var interaction: InteractionFeatures?
     var watch: WatchFeatures?
 }
+
+// MARK: - Protocols
 
 protocol SensorProvider: AnyObject, Sendable {
     var providerId: String { get }
@@ -21,13 +25,42 @@ protocol SensorProvider: AnyObject, Sendable {
 protocol AudioProvider: SensorProvider {
     func consumeWindow(windowDuration: TimeInterval) -> AudioFeatures?
 }
+
 protocol WatchProvider: SensorProvider {
     func drainPendingWindows() -> [FeatureWindow]
     func connectivitySnapshot() -> WatchConnectivitySnapshot
 }
 
+// MARK: - Error Types
+
+enum SensorProviderError: LocalizedError {
+    case motionUnavailable
+    case audioSessionFailed(Error)
+    case audioEngineStartFailed(Error)
+    case microphonePermissionDenied
+    case watchSessionNotActivated
+
+    var errorDescription: String? {
+        switch self {
+        case .motionUnavailable:
+            return "Motion sensors are not available on this device"
+        case .audioSessionFailed(let error):
+            return "Failed to configure audio session: \(error.localizedDescription)"
+        case .audioEngineStartFailed(let error):
+            return "Failed to start audio engine: \(error.localizedDescription)"
+        case .microphonePermissionDenied:
+            return "Microphone permission was denied"
+        case .watchSessionNotActivated:
+            return "Watch session could not be activated"
+        }
+    }
+}
+
+// MARK: - Placeholder Providers
+
 final class PlaceholderAudioProvider: AudioProvider, @unchecked Sendable {
     let providerId = "audio.placeholder"
+
     func start(session: Session) throws {}
     func stop() {}
     func currentWindow() -> SensorWindowSnapshot? { nil }
@@ -36,6 +69,7 @@ final class PlaceholderAudioProvider: AudioProvider, @unchecked Sendable {
 
 final class PlaceholderWatchProvider: WatchProvider, @unchecked Sendable {
     let providerId = "watch.placeholder"
+
     func start(session: Session) throws {}
     func stop() {}
     func currentWindow() -> SensorWindowSnapshot? { nil }
@@ -54,50 +88,67 @@ final class PlaceholderWatchProvider: WatchProvider, @unchecked Sendable {
 
 final class HealthKitHistoryProvider: SensorProvider, @unchecked Sendable {
     let providerId = "healthkit.history"
+
     func start(session: Session) throws {}
     func stop() {}
     func currentWindow() -> SensorWindowSnapshot? { nil }
 }
 
+// MARK: - Live Watch Provider
+
 final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     let providerId = "watch.live"
 
-    private let lock = NSLock()
-    private var activeSessionId: UUID?
-    private var pendingWindows: [FeatureWindow] = []
-    private var deliveredWindowKeys: Set<String> = []
-    private var heartRateSamples: [WatchWindowPayload.HRSample] = []
-    private var latestWatch: WatchFeatures?
-    private var lastMessageAt: Date?
-    private var currentConnectivity = WatchConnectivitySnapshot(
-        isSupported: WCSession.isSupported(),
-        isPaired: false,
-        isReachable: false,
-        isWatchAppInstalled: false,
-        lastMessageAt: nil,
-        pendingWindowCount: 0
-    )
+    // MARK: - Protected State (ThreadSafeBox)
+
+    private struct ProtectedState: Sendable {
+        var activeSessionId: UUID?
+        var pendingWindows: [FeatureWindow] = []
+        var deliveredWindowKeys: Set<String> = []
+        var heartRateSamples: [WatchWindowPayload.HRSample] = []
+        var latestWatch: WatchFeatures?
+        var lastMessageAt: Date?
+        var currentConnectivity = WatchConnectivitySnapshot(
+            isSupported: WCSession.isSupported(),
+            isPaired: false,
+            isReachable: false,
+            isWatchAppInstalled: false,
+            lastMessageAt: nil,
+            pendingWindowCount: 0
+        )
+    }
+
+    private let protectedState: ThreadSafeBox<ProtectedState>
+
+    // MARK: - Other Properties
+
+    private var lastWatchReachable: Bool?
 
     private lazy var session: WCSession? = {
         guard WCSession.isSupported() else { return nil }
         return WCSession.default
     }()
 
+    // MARK: - Initialization
+
     override init() {
+        self.protectedState = ThreadSafeBox(ProtectedState())
         super.init()
         session?.delegate = self
         session?.activate()
         refreshConnectivity()
     }
 
+    // MARK: - WatchProvider Protocol
+
     func start(session: Session) throws {
-        lock.lock()
-        activeSessionId = session.sessionId
-        pendingWindows.removeAll()
-        deliveredWindowKeys.removeAll()
-        heartRateSamples.removeAll()
-        latestWatch = nil
-        lock.unlock()
+        protectedState.withLock { state in
+            state.activeSessionId = session.sessionId
+            state.pendingWindows.removeAll()
+            state.deliveredWindowKeys.removeAll()
+            state.heartRateSamples.removeAll()
+            state.latestWatch = nil
+        }
 
         self.session?.delegate = self
         self.session?.activate()
@@ -115,13 +166,13 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 
     func stop() {
-        let currentSessionId: UUID?
-        lock.lock()
-        currentSessionId = activeSessionId
-        activeSessionId = nil
-        latestWatch = nil
-        heartRateSamples.removeAll()
-        lock.unlock()
+        let currentSessionId: UUID? = protectedState.withLock { state in
+            let id = state.activeSessionId
+            state.activeSessionId = nil
+            state.latestWatch = nil
+            state.heartRateSamples.removeAll()
+            return id
+        }
 
         guard let currentSessionId else {
             refreshConnectivity()
@@ -141,9 +192,7 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 
     func currentWindow() -> SensorWindowSnapshot? {
-        lock.lock()
-        let latestWatch = self.latestWatch
-        lock.unlock()
+        let latestWatch = protectedState.withLock { $0.latestWatch }
         return SensorWindowSnapshot(
             motion: nil,
             audio: nil,
@@ -153,25 +202,25 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 
     func drainPendingWindows() -> [FeatureWindow] {
-        lock.lock()
-        defer { lock.unlock() }
-        let drained = pendingWindows.sorted { lhs, rhs in
-            if lhs.endTime == rhs.endTime {
-                return lhs.windowId < rhs.windowId
+        protectedState.withLock { state in
+            let drained = state.pendingWindows.sorted { lhs, rhs in
+                if lhs.endTime == rhs.endTime {
+                    return lhs.windowId < rhs.windowId
+                }
+                return lhs.endTime < rhs.endTime
             }
-            return lhs.endTime < rhs.endTime
+            state.pendingWindows.removeAll()
+            state.currentConnectivity.pendingWindowCount = 0
+            return drained
         }
-        pendingWindows.removeAll()
-        currentConnectivity.pendingWindowCount = 0
-        return drained
     }
 
     func connectivitySnapshot() -> WatchConnectivitySnapshot {
         refreshConnectivity()
-        lock.lock()
-        defer { lock.unlock() }
-        return currentConnectivity
+        return protectedState.withLock { $0.currentConnectivity }
     }
+
+    // MARK: - Private Methods
 
     private func transmit(command: WatchSyncCommand) {
         guard let session else { return }
@@ -197,69 +246,69 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
 
     private func refreshConnectivity() {
         guard let session else { return }
-        lock.lock()
-        currentConnectivity = WatchConnectivitySnapshot(
-            isSupported: true,
-            isPaired: session.isPaired,
-            isReachable: session.isReachable,
-            isWatchAppInstalled: session.isWatchAppInstalled,
-            lastMessageAt: lastMessageAt,
-            pendingWindowCount: pendingWindows.count
-        )
-        lock.unlock()
+
+        let isSupported = WCSession.isSupported()
+        let isPaired = session.isPaired
+        let isReachable = session.isReachable
+        let isWatchAppInstalled = session.isWatchAppInstalled
+
+        protectedState.withLock { state in
+            state.currentConnectivity = WatchConnectivitySnapshot(
+                isSupported: isSupported,
+                isPaired: isPaired,
+                isReachable: isReachable,
+                isWatchAppInstalled: isWatchAppInstalled,
+                lastMessageAt: state.lastMessageAt,
+                pendingWindowCount: state.pendingWindows.count
+            )
+        }
     }
 
     private func handle(payload: WatchWindowPayload) {
-        let currentSessionId: UUID?
-        lock.lock()
-        currentSessionId = activeSessionId
-        lock.unlock()
+        let currentSessionId: UUID? = protectedState.withLock { $0.activeSessionId }
 
         guard payload.sessionId == currentSessionId else { return }
         let windowKey = "\(payload.sessionId.uuidString)-\(payload.windowId)-\(payload.endTime.timeIntervalSince1970)"
 
-        lock.lock()
-        defer {
-            currentConnectivity.pendingWindowCount = pendingWindows.count
-            currentConnectivity.lastMessageAt = lastMessageAt
-            lock.unlock()
+        protectedState.withLock { state in
+            guard !state.deliveredWindowKeys.contains(windowKey) else { return }
+            state.deliveredWindowKeys.insert(windowKey)
+
+            let freshnessCutoff = payload.endTime.addingTimeInterval(-20 * 60)
+            state.heartRateSamples.append(contentsOf: payload.heartRateSamples)
+            state.heartRateSamples = deduplicated(samples: state.heartRateSamples)
+                .filter { $0.timestamp >= freshnessCutoff }
+
+            let heartRateTrend = Self.computeHeartRateTrend(
+                samples: state.heartRateSamples,
+                endTime: payload.endTime
+            )
+            let watchFeatures = WatchFeatures(
+                wristAccelRMS: payload.wristAccelRMS,
+                wristStillDuration: payload.wristStillDuration,
+                heartRate: payload.heartRate,
+                heartRateTrend: heartRateTrend,
+                dataQuality: payload.dataQuality
+            )
+
+            state.latestWatch = watchFeatures
+            state.lastMessageAt = payload.sentAt
+            state.pendingWindows.append(
+                FeatureWindow(
+                    windowId: payload.windowId,
+                    startTime: payload.startTime,
+                    endTime: payload.endTime,
+                    duration: payload.endTime.timeIntervalSince(payload.startTime),
+                    source: .watch,
+                    motion: nil,
+                    audio: nil,
+                    interaction: nil,
+                    watch: watchFeatures
+                )
+            )
         }
 
-        guard !deliveredWindowKeys.contains(windowKey) else { return }
-        deliveredWindowKeys.insert(windowKey)
-
-        let freshnessCutoff = payload.endTime.addingTimeInterval(-20 * 60)
-        heartRateSamples.append(contentsOf: payload.heartRateSamples)
-        heartRateSamples = deduplicated(samples: heartRateSamples)
-            .filter { $0.timestamp >= freshnessCutoff }
-
-        let heartRateTrend = Self.computeHeartRateTrend(
-            samples: heartRateSamples,
-            endTime: payload.endTime
-        )
-        let watchFeatures = WatchFeatures(
-            wristAccelRMS: payload.wristAccelRMS,
-            wristStillDuration: payload.wristStillDuration,
-            heartRate: payload.heartRate,
-            heartRateTrend: heartRateTrend,
-            dataQuality: payload.dataQuality
-        )
-
-        latestWatch = watchFeatures
-        lastMessageAt = payload.sentAt
-        pendingWindows.append(
-            FeatureWindow(
-                windowId: payload.windowId,
-                startTime: payload.startTime,
-                endTime: payload.endTime,
-                duration: payload.endTime.timeIntervalSince(payload.startTime),
-                source: .watch,
-                motion: nil,
-                audio: nil,
-                interaction: nil,
-                watch: watchFeatures
-            )
-        )
+        refreshConnectivity()
     }
 
     private func deduplicated(samples: [WatchWindowPayload.HRSample]) -> [WatchWindowPayload.HRSample] {
@@ -312,6 +361,8 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 }
 
+// MARK: - WCSessionDelegate
+
 extension LiveWatchProvider: WCSessionDelegate {
     func session(
         _ session: WCSession,
@@ -361,8 +412,10 @@ extension LiveWatchProvider: WCSessionDelegate {
     }
 }
 
+// MARK: - Live Motion Provider
+
 final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
-    private struct MotionSample {
+    private struct MotionSample: Sendable {
         let timestamp: Date
         let accelerationMagnitude: Double
         let attitudeChangeRate: Double
@@ -372,23 +425,26 @@ final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
 
     private let motionManager = CMMotionManager()
     private let queue = OperationQueue()
-    private let lock = NSLock()
-    private var samples: [MotionSample] = []
-    private var lastAttitude: CMAttitude?
 
-    init() {
+    // Use ThreadSafeArray instead of NSLock + array for better concurrency safety
+    private let samples: ThreadSafeArray<MotionSample>
+    private let lastAttitude: ThreadSafeBox<CMAttitude?>
+
+    init(maxSamples: Int = 10000) {
+        self.samples = ThreadSafeArray(maxSize: maxSamples)
+        self.lastAttitude = ThreadSafeBox(nil)
         queue.name = "SleepDetectionPOC.motion-provider"
         queue.qualityOfService = .utility
     }
 
     func start(session: Session) throws {
-        lock.lock()
         samples.removeAll()
-        lastAttitude = nil
-        lock.unlock()
+        lastAttitude.write { $0 = nil }
 
         motionManager.deviceMotionUpdateInterval = 0.1
-        guard motionManager.isDeviceMotionAvailable else { return }
+        guard motionManager.isDeviceMotionAvailable else {
+            throw SensorProviderError.motionUnavailable
+        }
 
         motionManager.startDeviceMotionUpdates(to: queue) { [weak self] motion, _ in
             guard let self, let motion else { return }
@@ -400,7 +456,7 @@ final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
             )
 
             let attitudeRate: Double
-            if let previous = self.lastAttitude {
+            if let previous = self.lastAttitude.value {
                 let deltaPitch = motion.attitude.pitch - previous.pitch
                 let deltaRoll = motion.attitude.roll - previous.roll
                 attitudeRate = sqrt(deltaPitch * deltaPitch + deltaRoll * deltaRoll) * 57.2958 / 0.1
@@ -408,8 +464,7 @@ final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
                 attitudeRate = 0
             }
 
-            self.lock.lock()
-            self.lastAttitude = motion.attitude.copy() as? CMAttitude
+            self.lastAttitude.write { $0 = motion.attitude.copy() as? CMAttitude }
             self.samples.append(
                 MotionSample(
                     timestamp: Date(),
@@ -417,21 +472,18 @@ final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
                     attitudeChangeRate: attitudeRate
                 )
             )
-            self.lock.unlock()
         }
     }
 
     func stop() {
         motionManager.stopDeviceMotionUpdates()
-        lock.lock()
         samples.removeAll()
-        lastAttitude = nil
-        lock.unlock()
+        lastAttitude.write { $0 = nil }
     }
 
     func currentWindow() -> SensorWindowSnapshot? {
         SensorWindowSnapshot(
-            motion: aggregateAndOptionallyDrain(shouldDrain: false),
+            motion: aggregate(shouldDrain: false),
             audio: nil,
             interaction: nil,
             watch: nil
@@ -439,19 +491,19 @@ final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
     }
 
     func drainMotionFeatures(windowDuration: TimeInterval) -> MotionFeatures? {
-        aggregateAndOptionallyDrain(shouldDrain: true, fallbackDuration: windowDuration)
+        aggregate(shouldDrain: true, fallbackDuration: windowDuration)
     }
 
-    private func aggregateAndOptionallyDrain(
+    private func aggregate(
         shouldDrain: Bool,
         fallbackDuration: TimeInterval = 30
     ) -> MotionFeatures? {
-        lock.lock()
-        let currentSamples = samples
+        let currentSamples: [MotionSample]
         if shouldDrain {
-            samples.removeAll()
+            currentSamples = samples.drain()
+        } else {
+            currentSamples = samples.allElements()
         }
-        lock.unlock()
 
         guard !currentSamples.isEmpty else { return nil }
 
@@ -477,21 +529,36 @@ final class LiveMotionProvider: SensorProvider, @unchecked Sendable {
     }
 }
 
+// MARK: - Live Interaction Provider
+
 final class LiveInteractionProvider: SensorProvider, @unchecked Sendable {
     let providerId = "interaction.live"
 
+    // Use ThreadSafeBox for thread-safe state access
+    private struct ProtectedState: Sendable {
+        var isMonitoring = false
+        var isLocked = false
+        var lastInteractionAt: Date?
+        var screenWakeCount = 0
+    }
+
+    private let protectedState: ThreadSafeBox<ProtectedState>
     private var observationTokens: [NSObjectProtocol] = []
-    private var isMonitoring = false
-    private var isLocked = false
-    private var lastInteractionAt: Date?
-    private var screenWakeCount = 0
+    private let observationQueue = DispatchQueue(label: "SleepDetectionPOC.interaction-observer")
+
+    init() {
+        self.protectedState = ThreadSafeBox(ProtectedState())
+    }
 
     func start(session: Session) throws {
-        guard !isMonitoring else { return }
-        isMonitoring = true
-        lastInteractionAt = session.startTime
-        screenWakeCount = 0
-        isLocked = false
+        guard !protectedState.value.isMonitoring else { return }
+
+        protectedState.write { state in
+            state.isMonitoring = true
+            state.lastInteractionAt = session.startTime
+            state.screenWakeCount = 0
+            state.isLocked = false
+        }
 
         let center = NotificationCenter.default
         observationTokens = [
@@ -500,29 +567,45 @@ final class LiveInteractionProvider: SensorProvider, @unchecked Sendable {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.screenWakeCount += 1
-                self?.isLocked = false
+                self?.observationQueue.async {
+                    self?.protectedState.write { state in
+                        state.screenWakeCount += 1
+                        state.isLocked = false
+                    }
+                }
             },
             center.addObserver(
                 forName: UIApplication.willResignActiveNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.isLocked = true
+                self?.observationQueue.async {
+                    self?.protectedState.write { state in
+                        state.isLocked = true
+                    }
+                }
             },
             center.addObserver(
                 forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.isLocked = true
+                self?.observationQueue.async {
+                    self?.protectedState.write { state in
+                        state.isLocked = true
+                    }
+                }
             },
             center.addObserver(
                 forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.isLocked = false
+                self?.observationQueue.async {
+                    self?.protectedState.write { state in
+                        state.isLocked = false
+                    }
+                }
             }
         ]
     }
@@ -530,47 +613,56 @@ final class LiveInteractionProvider: SensorProvider, @unchecked Sendable {
     func stop() {
         observationTokens.forEach(NotificationCenter.default.removeObserver)
         observationTokens.removeAll()
-        isMonitoring = false
-        screenWakeCount = 0
+
+        protectedState.write { state in
+            state.isMonitoring = false
+            state.screenWakeCount = 0
+        }
     }
 
     func currentWindow() -> SensorWindowSnapshot? {
-        SensorWindowSnapshot(
+        let state = protectedState.value
+        return SensorWindowSnapshot(
             motion: nil,
             audio: nil,
-            interaction: snapshot(now: Date(), resetCounters: false),
+            interaction: snapshot(from: state, now: Date()),
             watch: nil
         )
     }
 
     func markInteraction(at date: Date = Date()) {
-        lastInteractionAt = date
-        isLocked = false
+        protectedState.write { state in
+            state.lastInteractionAt = date
+            state.isLocked = false
+        }
     }
 
     func consumeWindow(now: Date) -> InteractionFeatures {
-        snapshot(now: now, resetCounters: true)
-    }
+        let state = protectedState.value
+        let features = snapshot(from: state, now: now)
 
-    private func snapshot(now: Date, resetCounters: Bool) -> InteractionFeatures {
-        let sinceLastInteraction = now.timeIntervalSince(lastInteractionAt ?? now)
-        let features = InteractionFeatures(
-            isLocked: isLocked,
-            timeSinceLastInteraction: sinceLastInteraction,
-            screenWakeCount: screenWakeCount,
-            lastInteractionAt: lastInteractionAt
-        )
-
-        if resetCounters {
-            screenWakeCount = 0
+        protectedState.write { state in
+            state.screenWakeCount = 0
         }
 
         return features
     }
+
+    private func snapshot(from state: ProtectedState, now: Date) -> InteractionFeatures {
+        let sinceLastInteraction = now.timeIntervalSince(state.lastInteractionAt ?? now)
+        return InteractionFeatures(
+            isLocked: state.isLocked,
+            timeSinceLastInteraction: sinceLastInteraction,
+            screenWakeCount: state.screenWakeCount,
+            lastInteractionAt: state.lastInteractionAt
+        )
+    }
 }
 
+// MARK: - Live Audio Provider
+
 final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
-    private struct AudioFrame {
+    private struct AudioFrame: Sendable {
         let timestamp: Date
         let rms: Double
         let peak: Double
@@ -579,56 +671,62 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
     let providerId = "audio.live"
 
     private let engine = AVAudioEngine()
-    private let lock = NSLock()
-    private var frames: [AudioFrame] = []
-    private var isRunning = false
+    private let samples: ThreadSafeArray<AudioFrame>
+    private let isRunning: ThreadSafeBox<Bool>
+
+    init(maxSamples: Int = 10000) {
+        self.samples = ThreadSafeArray(maxSize: maxSamples)
+        self.isRunning = ThreadSafeBox(false)
+    }
 
     func start(session: Session) throws {
-        lock.lock()
-        frames.removeAll()
-        lock.unlock()
+        samples.removeAll()
 
-        guard PermissionHelper.microphoneGranted() else { return }
-        guard !isRunning else { return }
+        guard PermissionHelper.microphoneGranted() else {
+            throw SensorProviderError.microphonePermissionDenied
+        }
+
+        guard !isRunning.value else { return }
 
         let audioSession = AVAudioSession.sharedInstance()
-        try? audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers])
-        try? audioSession.setActive(true)
+        do {
+            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers])
+            try audioSession.setActive(true)
+        } catch {
+            throw SensorProviderError.audioSessionFailed(error)
+        }
 
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         inputNode.removeTap(onBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak self] buffer, _ in
             guard let self, let stats = Self.extractStats(from: buffer) else { return }
-            self.lock.lock()
-            self.frames.append(
+            self.samples.append(
                 AudioFrame(
                     timestamp: Date(),
                     rms: stats.rms,
                     peak: stats.peak
                 )
             )
-            self.lock.unlock()
         }
 
         engine.prepare()
         do {
             try engine.start()
-            isRunning = true
+            isRunning.write { $0 = true }
         } catch {
             inputNode.removeTap(onBus: 0)
             try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            throw SensorProviderError.audioEngineStartFailed(error)
         }
     }
 
     func stop() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
-        isRunning = false
+        isRunning.write { $0 = false }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        lock.lock()
-        frames.removeAll()
-        lock.unlock()
+        samples.removeAll()
     }
 
     func currentWindow() -> SensorWindowSnapshot? {
@@ -648,12 +746,12 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         shouldDrain: Bool,
         fallbackDuration: TimeInterval = 30
     ) -> AudioFeatures? {
-        lock.lock()
-        let currentFrames = frames
+        let currentFrames: [AudioFrame]
         if shouldDrain {
-            frames.removeAll()
+            currentFrames = samples.drain()
+        } else {
+            currentFrames = samples.allElements()
         }
-        lock.unlock()
 
         guard !currentFrames.isEmpty else { return nil }
 
@@ -710,6 +808,8 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         return (rms, peak)
     }
 }
+
+// MARK: - Permission Helper
 
 enum PermissionHelper {
     static func microphoneGranted() -> Bool {

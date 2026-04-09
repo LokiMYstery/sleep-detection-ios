@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct SleepDetectionPOCApp: App {
@@ -61,11 +62,84 @@ private struct RootTabView: View {
                 Label("Settings", systemImage: "gearshape")
             }
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    model.markInteraction()
+        .overlay {
+            InteractionTrackingView {
+                model.markInteraction()
+            }
+            .allowsHitTesting(false)
+        }
+        .alert(item: $model.lastError) { error in
+            Alert(
+                title: Text(error.title),
+                message: Text(error.message),
+                dismissButton: .default(Text("OK")) {
+                    model.clearLastError()
                 }
+            )
+        }
+    }
+}
+
+// MARK: - Passthrough Interaction Tracker
+
+/// Tracks user touches for interaction timing without intercepting or
+/// blocking any gesture — buttons, scrolls, and taps all work normally.
+private struct InteractionTrackingView: UIViewRepresentable {
+    let onInteraction: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onInteraction: onInteraction)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+
+        let recognizer = PassthroughGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleTouch)
         )
+        recognizer.cancelsTouchesInView = false
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        view.addGestureRecognizer(recognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onInteraction = onInteraction
+    }
+
+    final class Coordinator: NSObject {
+        var onInteraction: () -> Void
+
+        init(onInteraction: @escaping () -> Void) {
+            self.onInteraction = onInteraction
+        }
+
+        @objc func handleTouch() {
+            onInteraction()
+        }
+    }
+}
+
+/// A gesture recognizer that immediately recognizes any touch but never
+/// cancels or delays delivery to other recognizers / controls.
+private final class PassthroughGestureRecognizer: UIGestureRecognizer {
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .recognized
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .recognized
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .ended
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .cancelled
     }
 }

@@ -42,9 +42,16 @@ struct HomeView: View {
                 } else {
                     LabeledContent("Status", value: "Idle")
                     LabeledContent("Default placement", value: model.settings.defaultPhonePlacement.displayName)
-                    Button("Start Tonight's Recording") {
+                    if model.isStartingSession {
+                        HStack {
+                            ProgressView()
+                            Text("Starting tonight's recording…")
+                        }
+                    }
+                    Button(model.isStartingSession ? "Starting…" : "Start Tonight's Recording") {
                         Task { await model.startSession() }
                     }
+                    .disabled(model.isStartingSession)
                 }
             }
 
@@ -54,6 +61,16 @@ struct HomeView: View {
                 LabeledContent("Microphone", value: model.deviceCondition.hasMicrophoneAccess ? "Granted" : "Not Granted")
                 LabeledContent("Watch", value: model.deviceCondition.hasWatch ? "Paired" : "Not Paired")
                 LabeledContent("Watch Reachability", value: model.deviceCondition.watchReachable ? "Reachable" : "Disconnected")
+                if !model.deviceCondition.hasHealthKitAccess && !model.settings.disableHealthKitPriors {
+                    Button("Request HealthKit Access") {
+                        Task { await model.requestHealthKitAccess() }
+                    }
+                }
+                if !model.deviceCondition.hasMicrophoneAccess && !model.settings.disableMicrophoneFeatures {
+                    Button("Request Microphone Access") {
+                        Task { await model.requestMicrophoneAccess() }
+                    }
+                }
             }
 
             Section("Latest Predictions") {

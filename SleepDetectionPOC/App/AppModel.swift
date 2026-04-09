@@ -21,6 +21,8 @@ final class AppModel: ObservableObject {
     @Published var evaluationExportURL: URL?
     @Published var selectedSessionExportURL: URL?
     @Published var replayStatusMessage: String?
+    @Published var lastError: AppError?
+    @Published var isStartingSession = false
 
     let eventBus = EventBus.shared
 
@@ -42,6 +44,19 @@ final class AppModel: ObservableObject {
     private var lastWindowBoundary: Date?
     private var lastWatchReachable: Bool?
     private var hasBootstrapped = false
+
+    /// App-level error type for UI display
+    struct AppError: Identifiable, Equatable {
+        let id = UUID()
+        let timestamp: Date
+        let title: String
+        let message: String
+        let severity: ErrorSeverity
+
+        static func == (lhs: AppError, rhs: AppError) -> Bool {
+            lhs.id == rhs.id
+        }
+    }
 
     init(
         repository: SessionRepository = FileSessionRepository(),
@@ -67,16 +82,14 @@ final class AppModel: ObservableObject {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
         settings = await settingsStore.load()
-        _ = await healthKitService.requestAuthorization()
-        _ = await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { granted in
-                continuation.resume(returning: granted)
-            }
-        }
         deviceCondition = await healthKitService.detectDeviceCondition()
 
-        let sleepSamples = settings.disableHealthKitPriors ? [] : await healthKitService.fetchRecentSleepSamples()
-        let heartRateSamples = settings.disableHealthKitPriors ? [] : await healthKitService.fetchRecentHeartRateSamples()
+        let sleepSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
+            ? []
+            : await healthKitService.fetchRecentSleepSamples()
+        let heartRateSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
+            ? []
+            : await healthKitService.fetchRecentHeartRateSamples()
         priorSnapshot = PriorComputer.compute(
             sleepSamples: sleepSamples,
             heartRateSamples: heartRateSamples,
@@ -105,17 +118,32 @@ final class AppModel: ObservableObject {
     }
 
     func startSession() async {
-        guard currentSession == nil else { return }
+        guard currentSession == nil, !isStartingSession else { return }
+        isStartingSession = true
+        defer { isStartingSession = false }
         await bootstrapIfNeeded()
+        if !settings.disableHealthKitPriors, !deviceCondition.hasHealthKitAccess {
+            _ = await healthKitService.requestAuthorization()
+        }
+        if !settings.disableMicrophoneFeatures, !PermissionHelper.microphoneGranted() {
+            _ = await withCheckedContinuation { continuation in
+                AVAudioApplication.requestRecordPermission { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        }
         deviceCondition = await healthKitService.detectDeviceCondition()
 
         let start = Date()
+        var sessionDeviceCondition = deviceCondition
+        var disabledFeatures = settings.disableHealthKitPriors ? ["healthkitPriors"] : []
+        var startupWarnings: [String] = []
         var session = Session.make(
             startTime: start,
-            deviceCondition: deviceCondition,
+            deviceCondition: sessionDeviceCondition,
             priorLevel: priorSnapshot.level,
             enabledRoutes: RouteId.allCases,
-            disabledFeatures: settings.disableHealthKitPriors ? ["healthkitPriors"] : []
+            disabledFeatures: disabledFeatures
         )
         session.status = .recording
         session.phonePlacement = settings.defaultPhonePlacement.rawValue
@@ -123,11 +151,120 @@ final class AppModel: ObservableObject {
         do {
             try await repository.createSession(session)
             try interactionProvider.start(session: session)
-            try motionProvider.start(session: session)
-            try audioProvider.start(session: session)
-            try watchProvider.start(session: session)
         } catch {
+            await reportError(
+                title: "Failed to Start Session",
+                message: error.localizedDescription,
+                severity: .error
+            )
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartFailed",
+                payload: [
+                    "error": error.localizedDescription,
+                    "errorType": "Unknown"
+                ]
+            ))
             return
+        }
+
+        do {
+            try motionProvider.start(session: session)
+        } catch let error as SensorProviderError {
+            sessionDeviceCondition.hasMotionAccess = false
+            disabledFeatures.append("motionUnavailable")
+            startupWarnings.append("Motion sensors unavailable. Route C and D may be limited.")
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "motion",
+                    "error": error.localizedDescription
+                ]
+            ))
+        } catch {
+            sessionDeviceCondition.hasMotionAccess = false
+            disabledFeatures.append("motionUnavailable")
+            startupWarnings.append("Motion sensors failed to start. Route C and D may be limited.")
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "motion",
+                    "error": error.localizedDescription
+                ]
+            ))
+        }
+
+        do {
+            try audioProvider.start(session: session)
+        } catch let error as SensorProviderError {
+            sessionDeviceCondition.hasMicrophoneAccess = false
+            disabledFeatures.append("microphoneUnavailable")
+            startupWarnings.append("Microphone unavailable. Route D will be disabled for this session.")
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "audio",
+                    "error": error.localizedDescription
+                ]
+            ))
+        } catch {
+            sessionDeviceCondition.hasMicrophoneAccess = false
+            disabledFeatures.append("microphoneUnavailable")
+            startupWarnings.append("Microphone failed to start. Route D will be disabled for this session.")
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "audio",
+                    "error": error.localizedDescription
+                ]
+            ))
+        }
+
+        do {
+            try watchProvider.start(session: session)
+        } catch let error as SensorProviderError {
+            sessionDeviceCondition.hasWatch = false
+            sessionDeviceCondition.watchReachable = false
+            disabledFeatures.append("watchUnavailable")
+            startupWarnings.append("Watch connection unavailable. Route E will use iPhone-only evidence.")
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "watch",
+                    "error": error.localizedDescription
+                ]
+            ))
+        } catch {
+            sessionDeviceCondition.hasWatch = false
+            sessionDeviceCondition.watchReachable = false
+            disabledFeatures.append("watchUnavailable")
+            startupWarnings.append("Watch connection failed to start. Route E will use iPhone-only evidence.")
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "watch",
+                    "error": error.localizedDescription
+                ]
+            ))
+        }
+
+        session.deviceCondition = sessionDeviceCondition
+        session.disabledFeatures = Array(NSOrderedSet(array: disabledFeatures)) as? [String] ?? disabledFeatures
+        deviceCondition = sessionDeviceCondition
+        try? await repository.updateSession(session)
+
+        if !startupWarnings.isEmpty {
+            await reportError(
+                title: "Recording Started With Limited Sensors",
+                message: startupWarnings.joined(separator: "\n"),
+                severity: .warning
+            )
         }
 
         currentSession = session
@@ -227,14 +364,55 @@ final class AppModel: ObservableObject {
     func saveSettings() async {
         await settingsStore.save(settings)
         deviceCondition = await healthKitService.detectDeviceCondition()
-        let sleepSamples = settings.disableHealthKitPriors ? [] : await healthKitService.fetchRecentSleepSamples()
-        let heartRateSamples = settings.disableHealthKitPriors ? [] : await healthKitService.fetchRecentHeartRateSamples()
+        let sleepSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
+            ? []
+            : await healthKitService.fetchRecentSleepSamples()
+        let heartRateSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
+            ? []
+            : await healthKitService.fetchRecentHeartRateSamples()
         priorSnapshot = PriorComputer.compute(
             sleepSamples: sleepSamples,
             heartRateSamples: heartRateSamples,
             settings: settings,
             hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
         )
+    }
+
+    func requestHealthKitAccess() async {
+        guard !settings.disableHealthKitPriors else { return }
+        let granted = await healthKitService.requestAuthorization()
+        deviceCondition = await healthKitService.detectDeviceCondition()
+        let sleepSamples = granted ? await healthKitService.fetchRecentSleepSamples() : []
+        let heartRateSamples = granted ? await healthKitService.fetchRecentHeartRateSamples() : []
+        priorSnapshot = PriorComputer.compute(
+            sleepSamples: sleepSamples,
+            heartRateSamples: heartRateSamples,
+            settings: settings,
+            hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
+        )
+        if !granted {
+            await reportError(
+                title: "HealthKit Access Not Granted",
+                message: "Sleep history and heart-rate priors remain unavailable. You can enable access later in the Health app or iPhone Settings.",
+                severity: .warning
+            )
+        }
+    }
+
+    func requestMicrophoneAccess() async {
+        let granted = await withCheckedContinuation { continuation in
+            AVAudioApplication.requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+        deviceCondition = await healthKitService.detectDeviceCondition()
+        if !granted {
+            await reportError(
+                title: "Microphone Access Not Granted",
+                message: "Route D needs microphone-derived features. Recording can still start, but Route D will be unavailable.",
+                severity: .warning
+            )
+        }
     }
 
     func exportSummary() async {
@@ -368,10 +546,40 @@ final class AppModel: ObservableObject {
             )
         }
         recentWindows = Array(([window] + recentWindows).prefix(20))
-        try? await repository.appendWindow(window, to: sessionId)
+
+        // Handle repository errors with proper logging
+        do {
+            try await repository.appendWindow(window, to: sessionId)
+        } catch {
+            await reportError(
+                title: "Failed to Save Window",
+                message: "Could not append window #\(window.windowId) to session: \(error.localizedDescription)",
+                severity: .error
+            )
+            eventBus.post(RouteEvent(
+                routeId: .A,
+                eventType: "system.repositoryError",
+                payload: [
+                    "operation": "appendWindow",
+                    "windowId": "\(window.windowId)",
+                    "error": error.localizedDescription
+                ]
+            ))
+        }
+
         routeRunner?.process(window: window)
         activePredictions = routeRunner?.currentPredictions() ?? activePredictions
-        try? await repository.savePredictions(activePredictions, for: sessionId)
+
+        // Handle prediction save errors
+        do {
+            try await repository.savePredictions(activePredictions, for: sessionId)
+        } catch {
+            await reportError(
+                title: "Failed to Save Predictions",
+                message: "Could not save predictions: \(error.localizedDescription)",
+                severity: .warning
+            )
+        }
     }
 
     private func updateWatchConnectivityState() {
@@ -401,6 +609,34 @@ final class AppModel: ObservableObject {
             RouteDEngine(settings: settings),
             RouteEEngine(settings: settings)
         ]
+    }
+
+    // MARK: - Error Reporting
+
+    private func reportError(title: String, message: String, severity: ErrorSeverity) async {
+        let error = AppError(
+            timestamp: Date(),
+            title: title,
+            message: message,
+            severity: severity
+        )
+        lastError = error
+
+        // Post to event bus for logging
+        eventBus.post(RouteEvent(
+            routeId: .A,
+            eventType: "system.errorReported",
+            payload: [
+                "title": title,
+                "message": message,
+                "severity": severity.rawValue,
+                "timestamp": ISO8601DateFormatter.cached.string(from: error.timestamp)
+            ]
+        ))
+    }
+
+    func clearLastError() {
+        lastError = nil
     }
 
     private func makeReplayEngine(routeId: RouteId) -> RouteEngine? {

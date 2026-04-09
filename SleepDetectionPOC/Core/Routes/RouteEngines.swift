@@ -477,16 +477,20 @@ final class RouteCEngine: RouteEngine {
     private let settings: ExperimentSettings
     private let eventBus: EventBus
     private var prediction: RoutePrediction?
-    private var motionHistory: [MotionFeatures] = []
+    // Use CircularBuffer instead of Array for O(1) append/remove operations
+    // This eliminates O(n) removeFirst() operations
+    private var motionHistory: CircularBuffer<MotionFeatures>
     private var state: RouteCState = .monitoring
     private var consecutiveStillWindows = 0
     private var candidateDurationWindows = 0
     private var candidateEnteredTime: Date?
     private var lastSignificantMovementAt: Date?
 
-    init(settings: ExperimentSettings, eventBus: EventBus = .shared) {
+    init(settings: ExperimentSettings, eventBus: EventBus = .shared, maxHistorySize: Int = 100) {
         self.settings = settings
         self.eventBus = eventBus
+        // Pre-allocate circular buffer to avoid repeated allocations
+        self.motionHistory = CircularBuffer(capacity: maxHistorySize)
     }
 
     func canRun(condition: DeviceCondition, priorLevel: PriorLevel) -> Bool {
@@ -494,6 +498,7 @@ final class RouteCEngine: RouteEngine {
     }
 
     func start(session: Session, priors: RoutePriors) {
+        // Clear circular buffer instead of removeAll
         motionHistory.removeAll()
         state = .monitoring
         consecutiveStillWindows = 0
@@ -514,10 +519,9 @@ final class RouteCEngine: RouteEngine {
         guard let motion = window.motion else { return }
         let parameters = settings.routeCParameters
 
-        motionHistory.append(motion)
-        if motionHistory.count > max(10, parameters.trendWindowSize) {
-            motionHistory.removeFirst(motionHistory.count - max(10, parameters.trendWindowSize))
-        }
+        // Use CircularBuffer's appendOverwrite for O(1) operation
+        // This automatically overwrites oldest entries when full
+        motionHistory.appendOverwrite(motion)
 
         if motion.peakCount >= 2 {
             lastSignificantMovementAt = window.endTime
@@ -556,7 +560,8 @@ final class RouteCEngine: RouteEngine {
             }
         }
 
-        let movementTrend = Self.slope(for: motionHistory.suffix(parameters.trendWindowSize).map(\.accelRMS))
+        // Use CircularBuffer's last() method for efficient O(k) access to last k elements
+        let movementTrend = Self.slope(for: motionHistory.last(parameters.trendWindowSize).map(\.accelRMS))
         let timeSinceSignificantMovement = window.endTime.timeIntervalSince(lastSignificantMovementAt ?? window.startTime.addingTimeInterval(-10_000))
         let candidateReady =
             consecutiveStillWindows >= parameters.stillWindowThreshold &&

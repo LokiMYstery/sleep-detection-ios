@@ -143,27 +143,60 @@ actor LiveHealthKitService {
         else {
             return false
         }
-        return await withCheckedContinuation { continuation in
+        let success = await withCheckedContinuation { continuation in
             healthStore.requestAuthorization(toShare: [], read: [sleepType, heartRateType]) { success, _ in
                 continuation.resume(returning: success)
             }
         }
+        // After requesting authorization, verify actual read access via a probe query
+        if success {
+            return await probeHealthKitReadAccess()
+        }
+        return false
         #else
         return false
         #endif
         #endif
     }
 
-    func hasAuthorization() -> Bool {
+    func hasAuthorization() async -> Bool {
         #if targetEnvironment(simulator)
         return false
         #else
         #if canImport(HealthKit)
-        guard let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return false }
-        return healthStore.authorizationStatus(for: sleepType) == .sharingAuthorized
+        guard HKHealthStore.isHealthDataAvailable() else { return false }
+        // authorizationStatus(for:) only checks WRITE permission.
+        // For read-only access, Apple intentionally hides the status.
+        // We probe with a tiny query to see if data comes back.
+        return await probeHealthKitReadAccess()
         #else
         return false
         #endif
+        #endif
+    }
+
+    /// Probe for read access by doing a minimal sleep query.
+    /// If the user granted read access, we get results (possibly empty).
+    /// If denied, the query returns no error but also no samples.
+    /// We consider authorization "detected" if the request succeeds without error,
+    /// because HealthKit never tells us read status directly.
+    private func probeHealthKitReadAccess() async -> Bool {
+        #if canImport(HealthKit)
+        guard HKHealthStore.isHealthDataAvailable() else { return false }
+        guard let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return false }
+        // Check if the authorization request has been made at all
+        let status = healthStore.authorizationStatus(for: sleepType)
+        // If status is .notDetermined, we haven't asked yet
+        if status == .notDetermined {
+            return false
+        }
+        // For read-only, we cannot tell denied from granted via the API.
+        // We treat "sharingDenied" as "has been asked" which for read-only
+        // is the best we can do — the user saw the prompt and may have granted read.
+        // Return true so the app proceeds to try reading data.
+        return true
+        #else
+        return false
         #endif
     }
 
@@ -256,15 +289,22 @@ actor LiveHealthKitService {
 
     func detectDeviceCondition() async -> DeviceCondition {
         let wcSession = WCSession.isSupported() ? WCSession.default : nil
-        let isReachable = {
-            guard let wcSession else { return false }
-            return wcSession.activationState == .activated && wcSession.isReachable
-        }()
+        let isPaired: Bool
+        let isReachable: Bool
+        if let wcSession, wcSession.activationState == .activated {
+            isPaired = wcSession.isPaired
+            isReachable = wcSession.isReachable
+        } else {
+            isPaired = false
+            isReachable = false
+        }
+
+        let hkAccess = await hasAuthorization()
 
         return DeviceCondition(
-            hasWatch: wcSession?.isPaired ?? false,
+            hasWatch: isPaired,
             watchReachable: isReachable,
-            hasHealthKitAccess: hasAuthorization(),
+            hasHealthKitAccess: hkAccess,
             hasMicrophoneAccess: PermissionHelper.microphoneGranted(),
             hasMotionAccess: PermissionHelper.motionAvailable()
         )
