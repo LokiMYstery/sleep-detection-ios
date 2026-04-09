@@ -49,7 +49,7 @@
 		21C143B040E14D3F63097B93 /* SleepDetectionPOC.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SleepDetectionPOC.entitlements; sourceTree = "<group>"; };
 		43C5556F275F024E5E0CDB83 /* Formatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Formatters.swift; sourceTree = "<group>"; };
 		4954FA40E6A36B8182C8E180 /* SleepDetectionPOCTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SleepDetectionPOCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SleepDetectionPOC.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SleepDetectionPOC.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		531AF714B00D2AA2FCE146D8 /* ExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportView.swift; sourceTree = "<group>"; };
 		5C8DEC7DA84AB2A99A233836 /* SleepDetectionWatchApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SleepDetectionWatchApp.entitlements; sourceTree = "<group>"; };
 		5F65EA13E17C3547FAF2DAB8 /* SensorProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorProviders.swift; sourceTree = "<group>"; };
@@ -341,8 +341,14 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
+					1D91BBBCDC789F7F34156E8F = {
+						DevelopmentTeam = BYRP6L2B45;
+					};
 					E35B80ABEB8347899F6F3DA3 = {
-						DevelopmentTeam = "";
+						DevelopmentTeam = BYRP6L2B45;
+					};
+					FB26A0D068C11F65DA7C57E1 = {
+						DevelopmentTeam = BYRP6L2B45;
 					};
 				};
 			};
@@ -467,7 +473,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SleepDetectionPOC/Resources/SleepDetectionPOC.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = BYRP6L2B45;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = SleepDetectionPOC;
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetectionPOC reads your sleep and heart-rate history to evaluate sleep-onset predictions.";
@@ -525,7 +530,7 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = BYRP6L2B45;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -552,7 +557,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SleepDetectionPOC/Resources/SleepDetectionPOC.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				DEVELOPMENT_TEAM = BYRP6L2B45;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = SleepDetectionPOC;
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetectionPOC reads your sleep and heart-rate history to evaluate sleep-onset predictions.";
@@ -579,11 +583,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SleepDetectionWatchApp/Resources/SleepDetectionWatchApp.entitlements;
-				DEVELOPMENT_TEAM = BYRP6L2B45;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Sleep Watch";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetection watch reads heart-rate samples to evaluate sleep onset.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetection watch records wrist motion to estimate sleep onset.";
+				INFOPLIST_KEY_WKBackgroundModes = (
+					"workout-processing",
+				);
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.rickluo.SleepDetectionPOC;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOC.watchkitapp;
 				PRODUCT_MODULE_NAME = SleepDetectionWatchApp;
@@ -600,11 +606,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = SleepDetectionWatchApp/Resources/SleepDetectionWatchApp.entitlements;
-				DEVELOPMENT_TEAM = BYRP6L2B45;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Sleep Watch";
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetection watch reads heart-rate samples to evaluate sleep onset.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetection watch records wrist motion to estimate sleep onset.";
+				INFOPLIST_KEY_WKBackgroundModes = (
+					"workout-processing",
+				);
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.rickluo.SleepDetectionPOC;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOC.watchkitapp;
 				PRODUCT_MODULE_NAME = SleepDetectionWatchApp;
@@ -652,7 +660,7 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = BYRP6L2B45;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;

@@ -29,7 +29,9 @@ final class WatchRuntimeController: NSObject, ObservableObject {
     private var heartRateQuery: HKAnchoredObjectQuery?
     private var heartRateSamples: [WatchWindowPayload.HRSample] = []
     private var queuedPayloads: [WatchWindowPayload] = []
-    private var extractionTimer: Timer?
+    private var extractionTask: Task<Void, Never>?
+    private var workoutSession: HKWorkoutSession?
+    private var workoutBuilder: HKLiveWorkoutBuilder?
 
     func activateIfNeeded() {
         guard !hasActivated else { return }
@@ -46,7 +48,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             switch task {
             case let refreshTask as WKApplicationRefreshBackgroundTask:
                 emitWindow(forceBackfillFlag: true)
-                scheduleBackgroundRefresh()
+                flushQueuedPayloadsIfPossible()
                 refreshTask.setTaskCompletedWithSnapshot(false)
             default:
                 task.setTaskCompletedWithSnapshot(false)
@@ -57,10 +59,19 @@ final class WatchRuntimeController: NSObject, ObservableObject {
     private func requestHealthAuthorization() {
         guard HKHealthStore.isHealthDataAvailable() else { return }
         guard let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) else { return }
-        healthStore.requestAuthorization(toShare: [], read: [heartRateType]) { _, _ in }
+        let workoutType = HKObjectType.workoutType()
+        healthStore.requestAuthorization(toShare: [workoutType], read: [heartRateType]) { _, _ in }
     }
 
     private func startSession(with command: WatchSyncCommand) {
+        extractionTask?.cancel()
+        extractionTask = nil
+        if let query = heartRateQuery {
+            healthStore.stop(query)
+        }
+        heartRateQuery = nil
+        stopWorkoutSession()
+
         currentCommand = command
         activeSessionId = command.sessionId
         nextWindowId = 0
@@ -73,20 +84,21 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         if let sensorRecorder {
             sensorRecorder.recordAccelerometer(forDuration: command.sessionDuration)
         }
+        startWorkoutSession(at: command.sessionStartTime)
         startHeartRateQuery()
-        startExtractionTimer(interval: max(60, command.preferredWindowDuration))
-        scheduleBackgroundRefresh()
-        status = "Recording"
+        startExtractionLoop(interval: max(60, command.preferredWindowDuration))
+        status = workoutSession == nil ? "Recording (Degraded)" : "Recording"
     }
 
     private func stopSession() {
         emitWindow(forceBackfillFlag: true)
-        extractionTimer?.invalidate()
-        extractionTimer = nil
+        extractionTask?.cancel()
+        extractionTask = nil
         if let query = heartRateQuery {
             healthStore.stop(query)
         }
         heartRateQuery = nil
+        stopWorkoutSession()
         currentCommand = nil
         activeSessionId = nil
         status = "Idle"
@@ -136,19 +148,67 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         latestHeartRate = heartRateSamples.last?.bpm
     }
 
-    private func startExtractionTimer(interval: TimeInterval) {
-        extractionTimer?.invalidate()
-        extractionTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.emitWindow()
+    private func startExtractionLoop(interval: TimeInterval) {
+        extractionTask?.cancel()
+        extractionTask = Task { [weak self] in
+            let duration = UInt64(interval * 1_000_000_000)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: duration)
+                guard !Task.isCancelled, let self else { return }
+                self.emitWindow()
             }
         }
     }
 
-    private func scheduleBackgroundRefresh() {
-        guard currentCommand != nil else { return }
-        let preferredDate = Date().addingTimeInterval(2 * 60)
-        WKExtension.shared().scheduleBackgroundRefresh(withPreferredDate: preferredDate, userInfo: nil) { _ in }
+    private func startWorkoutSession(at startDate: Date) {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .other
+        configuration.locationType = .unknown
+
+        do {
+            let session = try HKWorkoutSession(healthStore: healthStore, configuration: configuration)
+            let builder = session.associatedWorkoutBuilder()
+            builder.dataSource = HKLiveWorkoutDataSource(
+                healthStore: healthStore,
+                workoutConfiguration: configuration
+            )
+            session.delegate = self
+            builder.delegate = self
+
+            workoutSession = session
+            workoutBuilder = builder
+
+            session.startActivity(with: startDate)
+            builder.beginCollection(withStart: startDate) { [weak self] success, _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if !success {
+                        self.status = "Recording (Workout Failed)"
+                    }
+                }
+            }
+        } catch {
+            workoutSession = nil
+            workoutBuilder = nil
+            status = "Recording (Workout Failed)"
+        }
+    }
+
+    private func stopWorkoutSession() {
+        let builder = workoutBuilder
+        let session = workoutSession
+        workoutBuilder = nil
+        workoutSession = nil
+
+        guard let builder, let session else { return }
+
+        let endDate = Date()
+        session.end()
+        builder.endCollection(withEnd: endDate) { _, _ in
+            builder.discardWorkout()
+        }
     }
 
     private func emitWindow(forceBackfillFlag: Bool = false) {
@@ -188,23 +248,29 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         dictionary["kind"] = "watchWindowPayload"
 
         if session.activationState == .activated {
-            session.transferUserInfo(dictionary)
             if session.isReachable {
-                session.sendMessage(dictionary, replyHandler: nil, errorHandler: nil)
+                session.sendMessage(dictionary, replyHandler: nil) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.fallbackToTransfer(payload: payload, dictionary: dictionary)
+                    }
+                }
             } else {
-                queuedPayloads.append(payload)
+                fallbackToTransfer(payload: payload, dictionary: dictionary)
             }
         } else {
             queuedPayloads.append(payload)
         }
 
-        pendingPayloadCount = queuedPayloads.count
+        updatePendingPayloadCount()
         refreshConnectivity()
     }
 
     private func flushQueuedPayloadsIfPossible() {
         guard let session, session.activationState == .activated else { return }
-        guard session.isReachable || !queuedPayloads.isEmpty else { return }
+        guard !queuedPayloads.isEmpty else {
+            updatePendingPayloadCount()
+            return
+        }
 
         let queued = queuedPayloads
         queuedPayloads.removeAll()
@@ -212,17 +278,43 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             guard let encoded = try? JSONEncoder.jsonLines.encode(payload) else { continue }
             guard var dictionary = (try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any] else { continue }
             dictionary["kind"] = "watchWindowPayload"
-            session.transferUserInfo(dictionary)
             if session.isReachable {
-                session.sendMessage(dictionary, replyHandler: nil, errorHandler: nil)
+                session.sendMessage(dictionary, replyHandler: nil) { [weak self] _ in
+                    Task { @MainActor in
+                        self?.fallbackToTransfer(payload: payload, dictionary: dictionary)
+                    }
+                }
+            } else {
+                session.transferUserInfo(dictionary)
             }
         }
-        pendingPayloadCount = queuedPayloads.count
+        updatePendingPayloadCount()
+    }
+
+    private func fallbackToTransfer(payload: WatchWindowPayload, dictionary: [String: Any]) {
+        guard let session else {
+            queuedPayloads.append(payload)
+            updatePendingPayloadCount()
+            return
+        }
+
+        if session.activationState == .activated {
+            session.transferUserInfo(dictionary)
+        } else {
+            queuedPayloads.append(payload)
+        }
+
+        updatePendingPayloadCount()
     }
 
     private func refreshConnectivity() {
         guard let session else { return }
         isReachable = session.isReachable
+        updatePendingPayloadCount()
+    }
+
+    private func updatePendingPayloadCount() {
+        pendingPayloadCount = queuedPayloads.count + (session?.outstandingUserInfoTransfers.count ?? 0)
     }
 
     private func handleIncoming(data: Data) {
@@ -344,6 +436,57 @@ extension WatchRuntimeController: WCSessionDelegate {
         guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
         Task { @MainActor in
             self.handleIncoming(data: data)
+        }
+    }
+}
+
+extension WatchRuntimeController: HKWorkoutSessionDelegate {
+    nonisolated func workoutSession(
+        _ workoutSession: HKWorkoutSession,
+        didChangeTo toState: HKWorkoutSessionState,
+        from fromState: HKWorkoutSessionState,
+        date: Date
+    ) {
+        Task { @MainActor in
+            switch toState {
+            case .running:
+                if self.currentCommand != nil {
+                    self.status = "Recording (Workout Active)"
+                }
+            case .ended:
+                if self.currentCommand != nil {
+                    self.status = "Recording (Workout Ended)"
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    nonisolated func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: any Error) {
+        Task { @MainActor in
+            self.status = "Recording (Workout Failed)"
+        }
+    }
+}
+
+extension WatchRuntimeController: HKLiveWorkoutBuilderDelegate {
+    nonisolated func workoutBuilderDidCollectEvent(_ workoutBuilder: HKLiveWorkoutBuilder) {}
+
+    nonisolated func workoutBuilder(
+        _ workoutBuilder: HKLiveWorkoutBuilder,
+        didCollectDataOf collectedTypes: Set<HKSampleType>
+    ) {
+        guard let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) else { return }
+        guard collectedTypes.contains(heartRateType) else { return }
+
+        let unit = HKUnit.count().unitDivided(by: .minute())
+        let bpm = workoutBuilder.statistics(for: heartRateType)?.mostRecentQuantity()?.doubleValue(for: unit)
+
+        Task { @MainActor in
+            if let bpm {
+                self.latestHeartRate = bpm
+            }
         }
     }
 }
