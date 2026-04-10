@@ -3,6 +3,9 @@ import CoreMotion
 import Foundation
 import UIKit
 import WatchConnectivity
+#if canImport(HealthKit)
+import HealthKit
+#endif
 
 // MARK: - Types
 
@@ -108,6 +111,7 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
         var heartRateSamples: [WatchWindowPayload.HRSample] = []
         var latestWatch: WatchFeatures?
         var lastMessageAt: Date?
+        var pendingCommand: WatchSyncCommand?
         var currentConnectivity = WatchConnectivitySnapshot(
             isSupported: WCSession.isSupported(),
             isPaired: false,
@@ -123,6 +127,9 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     // MARK: - Other Properties
 
     private var lastWatchReachable: Bool?
+    #if canImport(HealthKit)
+    private let healthStore = HKHealthStore()
+    #endif
 
     private lazy var session: WCSession? = {
         guard WCSession.isSupported() else { return nil }
@@ -142,18 +149,6 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     // MARK: - WatchProvider Protocol
 
     func start(session: Session) throws {
-        protectedState.withLock { state in
-            state.activeSessionId = session.sessionId
-            state.pendingWindows.removeAll()
-            state.deliveredWindowKeys.removeAll()
-            state.heartRateSamples.removeAll()
-            state.latestWatch = nil
-        }
-
-        self.session?.delegate = self
-        self.session?.activate()
-        refreshConnectivity()
-
         let command = WatchSyncCommand(
             command: .startSession,
             sessionId: session.sessionId,
@@ -162,6 +157,20 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             sessionDuration: 12 * 60 * 60,
             preferredWindowDuration: 2 * 60
         )
+
+        protectedState.withLock { state in
+            state.activeSessionId = session.sessionId
+            state.pendingWindows.removeAll()
+            state.deliveredWindowKeys.removeAll()
+            state.heartRateSamples.removeAll()
+            state.latestWatch = nil
+            state.pendingCommand = command
+        }
+
+        self.session?.delegate = self
+        self.session?.activate()
+        refreshConnectivity()
+        launchWatchAppForWorkout()
         transmit(command: command)
     }
 
@@ -187,6 +196,7 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             sessionDuration: 0,
             preferredWindowDuration: 0
         )
+        protectedState.write { $0.pendingCommand = command }
         transmit(command: command)
         refreshConnectivity()
     }
@@ -239,9 +249,37 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             try? session.updateApplicationContext(message)
             session.transferUserInfo(message)
             if session.isReachable {
-                session.sendMessage(message, replyHandler: nil, errorHandler: nil)
+                session.sendMessage(message, replyHandler: nil) { [weak self] _ in
+                    self?.refreshConnectivity()
+                }
             }
         }
+
+        protectedState.write { state in
+            state.pendingCommand = command.command == .stopSession ? nil : command
+            if session.isReachable {
+                state.pendingCommand = nil
+            }
+        }
+    }
+
+    private func flushPendingCommandIfPossible() {
+        guard let session, session.activationState == .activated, session.isReachable else { return }
+        let pendingCommand = protectedState.withLock { $0.pendingCommand }
+        guard let pendingCommand else { return }
+        transmit(command: pendingCommand)
+    }
+
+    private func launchWatchAppForWorkout() {
+        #if canImport(HealthKit)
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .other
+        configuration.locationType = .unknown
+        healthStore.startWatchApp(with: configuration) { [weak self] _, _ in
+            self?.refreshConnectivity()
+            self?.flushPendingCommandIfPossible()
+        }
+        #endif
     }
 
     private func refreshConnectivity() {
@@ -370,6 +408,7 @@ extension LiveWatchProvider: WCSessionDelegate {
         error: (any Error)?
     ) {
         refreshConnectivity()
+        flushPendingCommandIfPossible()
     }
 
     func sessionDidBecomeInactive(_ session: WCSession) {
@@ -383,6 +422,7 @@ extension LiveWatchProvider: WCSessionDelegate {
 
     func sessionReachabilityDidChange(_ session: WCSession) {
         refreshConnectivity()
+        flushPendingCommandIfPossible()
     }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
