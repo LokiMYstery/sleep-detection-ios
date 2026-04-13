@@ -776,10 +776,27 @@ final class RouteDEngine: RouteEngine {
             (
                 audio.envNoiseLevel <= parameters.audioQuietThreshold &&
                 audio.envNoiseVariance <= parameters.audioVarianceThreshold &&
-                audio.frictionEventCount <= parameters.frictionEventThreshold
+                audio.frictionEventCount <= parameters.frictionEventThreshold &&
+                audio.disturbanceScore < parameters.disturbanceRejectThreshold * 0.85
             )
+        let playbackPolluted = audio.playbackLeakageScore >= parameters.playbackLeakageRejectThreshold
+        let breathingSupport =
+            audio.breathingPresent &&
+            audio.breathingPeriodicityScore >= parameters.breathingMinPeriodicityScore &&
+            audio.breathingConfidence >= max(parameters.breathingMinPeriodicityScore, 0.5) &&
+            (audio.breathingIntervalCV ?? 0.35) <= parameters.breathingMaxIntervalCV &&
+            !playbackPolluted
+        let snoreSupport =
+            audio.snoreCandidateCount > 0 &&
+            audio.snoreConfidenceMax >= parameters.snoreCandidateMinConfidence &&
+            !playbackPolluted
+        let audioDisturbance =
+            audio.disturbanceScore >= parameters.disturbanceRejectThreshold ||
+            playbackPolluted ||
+            audio.frictionEventCount > max(parameters.frictionEventThreshold * 2, 2)
+        let audioSupportsSleep = quietAudio || breathingSupport || snoreSupport
 
-        if !(quietInteraction && stillMotion && quietAudio) {
+        if !(quietInteraction && stillMotion && audioSupportsSleep) || audioDisturbance {
             if state == .candidate {
                 eventBus.post(
                     RouteEvent(
@@ -789,7 +806,11 @@ final class RouteDEngine: RouteEngine {
                             "reason": rejectionReason(
                                 quietInteraction: quietInteraction,
                                 stillMotion: stillMotion,
-                                quietAudio: quietAudio
+                                quietAudio: quietAudio,
+                                breathingSupport: breathingSupport,
+                                snoreSupport: snoreSupport,
+                                audioDisturbance: audioDisturbance,
+                                playbackPolluted: playbackPolluted
                             )
                         ]
                     )
@@ -805,7 +826,9 @@ final class RouteDEngine: RouteEngine {
                 evidenceSummary: monitoringSummary(
                     motion: motion,
                     audio: audio,
-                    interaction: interaction
+                    interaction: interaction,
+                    breathingSupport: breathingSupport,
+                    snoreSupport: snoreSupport
                 ),
                 lastUpdated: window.endTime,
                 isAvailable: true
@@ -818,13 +841,14 @@ final class RouteDEngine: RouteEngine {
                 routeId: routeId,
                 predictedSleepOnset: nil,
                 confidence: .none,
-                evidenceSummary: "Audio restored, monitoring multimodal quietness",
+                evidenceSummary: "Audio restored, monitoring sleep audio evidence",
                 lastUpdated: window.endTime,
                 isAvailable: true
             )
         }
 
-        consecutiveFusionWindows += 1
+        let windowIncrement = 1 + (snoreSupport ? max(parameters.snoreBoostWindowCount, 0) : 0)
+        consecutiveFusionWindows += windowIncrement
         if candidateStartTime == nil {
             candidateStartTime = interaction.lastInteractionAt ?? window.startTime
         }
@@ -836,7 +860,7 @@ final class RouteDEngine: RouteEngine {
                 routeId: routeId,
                 predictedSleepOnset: predictedTime,
                 confidence: .confirmed,
-                evidenceSummary: "Confirmed using motion + audio + interaction from \(predictedTime.formattedTime)",
+                evidenceSummary: "Confirmed using motion + audio + interaction from \(predictedTime.formattedTime) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
                 lastUpdated: window.endTime,
                 isAvailable: true
             )
@@ -847,7 +871,9 @@ final class RouteDEngine: RouteEngine {
                     payload: [
                         "predictedTime": ISO8601DateFormatter.cached.string(from: predictedTime),
                         "method": "multimodalFusion",
-                        "fusionWindows": "\(consecutiveFusionWindows)"
+                        "fusionWindows": "\(consecutiveFusionWindows)",
+                        "breathingRate": audio.breathingRateEstimate.map { String(format: "%.1f", $0) } ?? "none",
+                        "snoreCount": "\(audio.snoreCandidateCount)"
                     ]
                 )
             )
@@ -863,7 +889,7 @@ final class RouteDEngine: RouteEngine {
                 routeId: routeId,
                 predictedSleepOnset: predictedTime,
                 confidence: confidence,
-                evidenceSummary: "Fusion quietness \(consecutiveFusionWindows)/\(parameters.confirmWindowCount) windows",
+                evidenceSummary: "Fusion support \(consecutiveFusionWindows)/\(parameters.confirmWindowCount) windows · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
                 lastUpdated: window.endTime,
                 isAvailable: true
             )
@@ -874,7 +900,9 @@ final class RouteDEngine: RouteEngine {
                     payload: [
                         "candidateTime": ISO8601DateFormatter.cached.string(from: predictedTime),
                         "fusionWindows": "\(consecutiveFusionWindows)",
-                        "noise": String(format: "%.3f", audio.envNoiseLevel)
+                        "noise": String(format: "%.3f", audio.envNoiseLevel),
+                        "breathingRate": audio.breathingRateEstimate.map { String(format: "%.1f", $0) } ?? "none",
+                        "snoreCount": "\(audio.snoreCandidateCount)"
                     ]
                 )
             )
@@ -885,7 +913,7 @@ final class RouteDEngine: RouteEngine {
             routeId: routeId,
             predictedSleepOnset: nil,
             confidence: .none,
-            evidenceSummary: "Fusion evidence \(consecutiveFusionWindows)/\(parameters.candidateWindowCount) windows",
+            evidenceSummary: "Fusion evidence \(consecutiveFusionWindows)/\(parameters.candidateWindowCount) windows · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
             lastUpdated: window.endTime,
             isAvailable: true
         )
@@ -911,15 +939,28 @@ final class RouteDEngine: RouteEngine {
     private func monitoringSummary(
         motion: MotionFeatures,
         audio: AudioFeatures,
-        interaction: InteractionFeatures
+        interaction: InteractionFeatures,
+        breathingSupport: Bool,
+        snoreSupport: Bool
     ) -> String {
-        "Waiting for multimodal quietness. Motion \(motion.accelRMS.formatted3), audio \(audio.envNoiseLevel.formatted3), inactive \(Int(interaction.timeSinceLastInteraction / 60)) min"
+        let breathingSummary: String
+        if breathingSupport, let rate = audio.breathingRateEstimate {
+            breathingSummary = "breathing \(String(format: "%.1f", rate)) bpm"
+        } else {
+            breathingSummary = "breathing \(audio.breathingConfidence.formatted2)"
+        }
+        let snoreSummary = snoreSupport ? "snore \(audio.snoreCandidateCount)" : "snore 0"
+        return "Waiting for sleep audio evidence. Motion \(motion.accelRMS.formatted3), audio \(audio.envNoiseLevel.formatted3), \(breathingSummary), \(snoreSummary), inactive \(Int(interaction.timeSinceLastInteraction / 60)) min"
     }
 
     private func rejectionReason(
         quietInteraction: Bool,
         stillMotion: Bool,
-        quietAudio: Bool
+        quietAudio: Bool,
+        breathingSupport: Bool,
+        snoreSupport: Bool,
+        audioDisturbance: Bool,
+        playbackPolluted: Bool
     ) -> String {
         if !quietInteraction {
             return "interaction_active"
@@ -927,7 +968,37 @@ final class RouteDEngine: RouteEngine {
         if !stillMotion {
             return "motion_active"
         }
-        return quietAudio ? "unknown" : "audio_active"
+        if playbackPolluted {
+            return "playback_leakage"
+        }
+        if audioDisturbance {
+            return "audio_disturbance"
+        }
+        if breathingSupport {
+            return "breathing_unstable"
+        }
+        if snoreSupport {
+            return "snore_without_sleep_context"
+        }
+        return quietAudio ? "unknown" : "audio_no_sleep_pattern"
+    }
+
+    private func audioEvidenceSummary(
+        audio: AudioFeatures,
+        quietAudio: Bool,
+        breathingSupport: Bool,
+        snoreSupport: Bool
+    ) -> String {
+        if snoreSupport {
+            return "snore-like \(audio.snoreCandidateCount) @ \(audio.snoreConfidenceMax.formatted2)"
+        }
+        if breathingSupport, let rate = audio.breathingRateEstimate {
+            return "breathing \(String(format: "%.1f", rate)) bpm @ \(audio.breathingConfidence.formatted2)"
+        }
+        if quietAudio {
+            return "quiet audio"
+        }
+        return "disturbance \(audio.disturbanceScore.formatted2)"
     }
 }
 
@@ -973,7 +1044,7 @@ final class RouteEEngine: RouteEngine {
     }
 
     func canRun(condition: DeviceCondition, priorLevel: PriorLevel) -> Bool {
-        condition.hasWatch && condition.watchReachable
+        condition.hasWatch
     }
 
     func start(session: Session, priors: RoutePriors) {
@@ -1008,11 +1079,9 @@ final class RouteEEngine: RouteEngine {
             routeId: routeId,
             predictedSleepOnset: nil,
             confidence: .none,
-            evidenceSummary: session.deviceCondition.watchReachable
-                ? "Waiting for Watch motion and heart-rate windows"
-                : "Watch paired but not reachable at session start",
+            evidenceSummary: "Watch warming up, waiting for first packet",
             lastUpdated: session.startTime,
-            isAvailable: session.deviceCondition.watchReachable
+            isAvailable: true
         )
     }
 
@@ -1277,11 +1346,9 @@ final class RouteEEngine: RouteEngine {
                 routeId: routeId,
                 predictedSleepOnset: nil,
                 confidence: .none,
-                evidenceSummary: session.deviceCondition.watchReachable
-                    ? "Waiting for Watch windows to arrive"
-                    : "Watch disconnected, waiting for backfill",
+                evidenceSummary: "Watch warming up, waiting for first packet",
                 lastUpdated: timeline.last?.endTime ?? session.startTime,
-                isAvailable: session.deviceCondition.watchReachable
+                isAvailable: true
             )
         } else {
             prediction = RoutePrediction(

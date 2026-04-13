@@ -49,9 +49,29 @@ extension Array where Element == Double {
         }
         return sorted[sorted.count / 2]
     }
+
+    func percentile(_ fraction: Double) -> Double? {
+        guard !isEmpty else { return nil }
+        let clamped: Double = Swift.min(Swift.max(fraction, 0.0), 1.0)
+        let sorted = self.sorted()
+        let position = Double(sorted.count - 1) * clamped
+        let lowerIndex = Int(position.rounded(FloatingPointRoundingRule.down))
+        let upperIndex = Int(position.rounded(FloatingPointRoundingRule.up))
+        if lowerIndex == upperIndex {
+            return sorted[lowerIndex]
+        }
+        let lowerValue: Double = sorted[lowerIndex]
+        let upperValue: Double = sorted[upperIndex]
+        let weight: Double = position - Double(lowerIndex)
+        return lowerValue + ((upperValue - lowerValue) * weight)
+    }
 }
 
 extension Double {
+    var formatted2: String {
+        String(format: "%.2f", self)
+    }
+
     var formatted3: String {
         String(format: "%.3f", self)
     }

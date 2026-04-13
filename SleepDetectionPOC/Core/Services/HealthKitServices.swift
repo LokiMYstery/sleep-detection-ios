@@ -17,20 +17,27 @@ struct HeartRateSample: Equatable, Sendable {
     var bpm: Double
 }
 
+struct HRVSample: Equatable, Sendable {
+    var timestamp: Date
+    var sdnn: Double
+}
+
 enum PriorComputer {
     static func compute(
         sleepSamples: [SleepSample],
         heartRateSamples: [HeartRateSample],
+        hrvSamples: [HRVSample],
         settings: ExperimentSettings,
         hasHealthKitAccess: Bool,
         calendar: Calendar = .current
     ) -> PriorSnapshot {
         let sleepCount = sleepSamples.count
         let heartRateDays = Set(heartRateSamples.map { calendar.startOfDay(for: $0.timestamp) }).count
+        let hrvDays = Set(hrvSamples.map { calendar.startOfDay(for: $0.timestamp) }).count
         let level: PriorLevel
         if hasHealthKitAccess, sleepCount >= 3 {
             level = .P1
-        } else if hasHealthKitAccess, heartRateDays >= 7 {
+        } else if hasHealthKitAccess, heartRateDays >= 7 || hrvDays >= 3 {
             level = .P2
         } else {
             level = .P3
@@ -48,6 +55,17 @@ enum PriorComputer {
 
         let baselineHeartRate = heartRateSamples.map(\.bpm).median
         let sleepTarget = baselineHeartRate.map { $0 * 0.85 }
+        let routeFReadiness = resolvedRouteFReadiness(
+            heartRateDays: heartRateDays,
+            hrvDays: hrvDays
+        )
+        let routeFPriors = computeRouteFPriors(
+            level: level,
+            sleepSamples: sleepSamples,
+            heartRateSamples: heartRateSamples,
+            hrvSamples: hrvSamples,
+            calendar: calendar
+        )
 
         return PriorSnapshot(
             level: level,
@@ -59,12 +77,26 @@ enum PriorComputer {
                 typicalLatencyMinutes: settings.estimatedLatency.minutes,
                 preSleepHRBaseline: baselineHeartRate,
                 sleepHRTarget: sleepTarget,
-                hrDropThreshold: baselineHeartRate.map { max(8, $0 * 0.12) }
+                hrDropThreshold: baselineHeartRate.map { max(8, $0 * 0.12) },
+                historicalEveningHRMedian: routeFPriors.eveningHRMedian,
+                historicalNightLowHRMedian: routeFPriors.nightLowHRMedian,
+                historicalHRVBaseline: routeFPriors.hrvBaseline,
+                routeFProfile: routeFPriors.profile,
+                routeFReadiness: routeFReadiness
             ),
             sleepSampleCount: sleepCount,
             heartRateDayCount: heartRateDays,
-            hasHealthKitAccess: hasHealthKitAccess
+            hrvDayCount: hrvDays,
+            hasHealthKitAccess: hasHealthKitAccess,
+            routeFReadiness: routeFReadiness
         )
+    }
+
+    private struct RouteFPriorsComputation {
+        var eveningHRMedian: Double?
+        var nightLowHRMedian: Double?
+        var hrvBaseline: Double?
+        var profile: RouteFProfile?
     }
 
     private static func normalizedBedtimeMinutes(date: Date, calendar: Calendar) -> Double {
@@ -76,6 +108,111 @@ enum PriorComputer {
     private static func clockTime(fromNormalizedMinutes minutes: Double) -> ClockTime {
         let corrected = Int(minutes.rounded()) % (24 * 60)
         return ClockTime(hour: corrected / 60, minute: corrected % 60)
+    }
+
+    private static func resolvedRouteFReadiness(
+        heartRateDays: Int,
+        hrvDays: Int
+    ) -> RouteFReadiness {
+        if heartRateDays >= 7, hrvDays >= 3 {
+            return .full
+        }
+        if heartRateDays >= 7 {
+            return .hrOnly
+        }
+        return .insufficient
+    }
+
+    private static func computeRouteFPriors(
+        level: PriorLevel,
+        sleepSamples: [SleepSample],
+        heartRateSamples: [HeartRateSample],
+        hrvSamples: [HRVSample],
+        calendar: Calendar
+    ) -> RouteFPriorsComputation {
+        let alignedEveningHR = sleepSamples.flatMap { sleep in
+            heartRateSamples
+                .filter { $0.timestamp >= sleep.startDate.addingTimeInterval(-30 * 60) && $0.timestamp <= sleep.startDate }
+                .map(\.bpm)
+        }
+        let alignedNightHR = sleepSamples.flatMap { sleep in
+            heartRateSamples
+                .filter { $0.timestamp >= sleep.startDate.addingTimeInterval(15 * 60) && $0.timestamp <= sleep.startDate.addingTimeInterval(60 * 60) }
+                .map(\.bpm)
+        }
+        let alignedNightHRV = sleepSamples.flatMap { sleep in
+            hrvSamples
+                .filter { $0.timestamp >= sleep.startDate && $0.timestamp <= sleep.startDate.addingTimeInterval(60 * 60) }
+                .map(\.sdnn)
+        }
+
+        let eveningWindowHR = heartRateSamples
+            .filter { isTimeOfDay($0.timestamp, betweenStartMinutes: 21 * 60 + 30, endMinutes: 23 * 60 + 30, calendar: calendar) }
+            .map(\.bpm)
+        let nightWindowHR = heartRateSamples
+            .filter { isTimeOfDay($0.timestamp, betweenStartMinutes: 0, endMinutes: 6 * 60, calendar: calendar) }
+            .map(\.bpm)
+        let nightWindowHRV = hrvSamples
+            .filter { isTimeOfDay($0.timestamp, betweenStartMinutes: 0, endMinutes: 6 * 60, calendar: calendar) }
+            .map(\.sdnn)
+
+        let eveningMedian: Double?
+        let nightLowMedian: Double?
+        let hrvBaseline: Double?
+
+        if level == .P1 {
+            eveningMedian = alignedEveningHR.median ?? eveningWindowHR.median ?? heartRateSamples.map(\.bpm).median
+            nightLowMedian = alignedNightHR.median ?? lowMedian(from: nightWindowHR) ?? heartRateSamples.map(\.bpm).percentile(0.25)
+            hrvBaseline = alignedNightHRV.median ?? highMedian(from: nightWindowHRV) ?? hrvSamples.map(\.sdnn).median
+        } else {
+            eveningMedian = eveningWindowHR.median ?? heartRateSamples.map(\.bpm).median
+            nightLowMedian = lowMedian(from: nightWindowHR) ?? heartRateSamples.map(\.bpm).percentile(0.25)
+            hrvBaseline = highMedian(from: nightWindowHRV) ?? hrvSamples.map(\.sdnn).median
+        }
+
+        let profile: RouteFProfile?
+        if let eveningMedian, let nightLowMedian {
+            let drop = eveningMedian - nightLowMedian
+            if drop >= 8 {
+                profile = .strong
+            } else if drop >= 5 {
+                profile = .moderate
+            } else {
+                profile = .weak
+            }
+        } else {
+            profile = nil
+        }
+
+        return RouteFPriorsComputation(
+            eveningHRMedian: eveningMedian,
+            nightLowHRMedian: nightLowMedian,
+            hrvBaseline: hrvBaseline,
+            profile: profile
+        )
+    }
+
+    private static func lowMedian(from values: [Double]) -> Double? {
+        guard let q1 = values.percentile(0.25) else { return nil }
+        let subset = values.filter { $0 <= q1 }
+        return subset.median ?? q1
+    }
+
+    private static func highMedian(from values: [Double]) -> Double? {
+        guard let q3 = values.percentile(0.75) else { return nil }
+        let subset = values.filter { $0 >= q3 }
+        return subset.median ?? q3
+    }
+
+    private static func isTimeOfDay(
+        _ date: Date,
+        betweenStartMinutes start: Int,
+        endMinutes: Int,
+        calendar: Calendar
+    ) -> Bool {
+        let components = calendar.dateComponents([.hour, .minute], from: date)
+        let totalMinutes = (components.hour ?? 0) * 60 + (components.minute ?? 0)
+        return totalMinutes >= start && totalMinutes <= endMinutes
     }
 }
 
@@ -139,12 +276,13 @@ actor LiveHealthKitService {
         guard HKHealthStore.isHealthDataAvailable() else { return false }
         guard
             let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis),
-            let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate)
+            let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate),
+            let hrvType = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
         else {
             return false
         }
         let success = await withCheckedContinuation { continuation in
-            healthStore.requestAuthorization(toShare: [], read: [sleepType, heartRateType]) { success, _ in
+            healthStore.requestAuthorization(toShare: [], read: [sleepType, heartRateType, hrvType]) { success, _ in
                 continuation.resume(returning: success)
             }
         }
@@ -287,17 +425,51 @@ actor LiveHealthKitService {
         #endif
     }
 
+    func fetchRecentHRVSamples(days: Int = 14) async -> [HRVSample] {
+        #if targetEnvironment(simulator)
+        return []
+        #else
+        #if canImport(HealthKit)
+        guard
+            HKHealthStore.isHealthDataAvailable(),
+            let hrvType = HKObjectType.quantityType(forIdentifier: .heartRateVariabilitySDNN)
+        else {
+            return []
+        }
+
+        let now = Date()
+        let start = Calendar.current.date(byAdding: .day, value: -days, to: now) ?? now
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: [])
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+
+        return await withCheckedContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: hrvType,
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: [sortDescriptor]
+            ) { _, samples, _ in
+                let unit = HKUnit.secondUnit(with: .milli)
+                let mapped = (samples as? [HKQuantitySample] ?? []).map { sample in
+                    HRVSample(
+                        timestamp: sample.startDate,
+                        sdnn: sample.quantity.doubleValue(for: unit)
+                    )
+                }
+                continuation.resume(returning: mapped)
+            }
+            healthStore.execute(query)
+        }
+        #else
+        return []
+        #endif
+        #endif
+    }
+
     func detectDeviceCondition() async -> DeviceCondition {
         let wcSession = WCSession.isSupported() ? WCSession.default : nil
-        let isPaired: Bool
-        let isReachable: Bool
-        if let wcSession, wcSession.activationState == .activated {
-            isPaired = wcSession.isPaired
-            isReachable = wcSession.isReachable
-        } else {
-            isPaired = false
-            isReachable = false
-        }
+        let isPaired = wcSession?.isPaired ?? false
+        let isReachable = wcSession?.activationState == .activated ? (wcSession?.isReachable ?? false) : false
 
         let hkAccess = await hasAuthorization()
 
@@ -374,6 +546,7 @@ actor LiveExportService: ExportService {
             "routeC_prediction", "routeC_error_min",
             "routeD_prediction", "routeD_error_min",
             "routeE_prediction", "routeE_error_min",
+            "routeF_prediction", "routeF_error_min",
             "healthkit_sleep_onset", "sample_quality"
         ].joined(separator: ",")
 
@@ -385,11 +558,13 @@ actor LiveExportService: ExportService {
             let cPrediction = predictions[.C]?.predictedSleepOnset?.csvTimestamp ?? ""
             let dPrediction = predictions[.D]?.predictedSleepOnset?.csvTimestamp ?? ""
             let ePrediction = predictions[.E]?.predictedSleepOnset?.csvTimestamp ?? ""
+            let fPrediction = predictions[.F]?.predictedSleepOnset?.csvTimestamp ?? ""
             let aError = truth?.errors["A"]?.errorMinutes.description ?? ""
             let bError = truth?.errors["B"]?.errorMinutes.description ?? ""
             let cError = truth?.errors["C"]?.errorMinutes.description ?? ""
             let dError = truth?.errors["D"]?.errorMinutes.description ?? ""
             let eError = truth?.errors["E"]?.errorMinutes.description ?? ""
+            let fError = truth?.errors["F"]?.errorMinutes.description ?? ""
             let truthTime = truth?.healthKitSleepOnset?.csvTimestamp ?? ""
             return [
                 bundle.session.date,
@@ -406,6 +581,8 @@ actor LiveExportService: ExportService {
                 dError,
                 ePrediction,
                 eError,
+                fPrediction,
+                fError,
                 truthTime,
                 bundle.sampleQuality.rawValue
             ].joined(separator: ",")
@@ -433,7 +610,7 @@ actor LiveExportService: ExportService {
             throw CocoaError(.fileNoSuchFile)
         }
 
-        let payload = try JSONEncoder.pretty.encode(bundle)
+        let payload = try JSONEncoder.pretty.encode(SessionExportPayload(bundle: bundle))
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("SleepPOC-\(sessionId.uuidString).json")
         try payload.write(to: url, options: .atomic)

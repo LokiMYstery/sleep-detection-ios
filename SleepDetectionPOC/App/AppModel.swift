@@ -23,6 +23,10 @@ final class AppModel: ObservableObject {
     @Published var replayStatusMessage: String?
     @Published var lastError: AppError?
     @Published var isStartingSession = false
+    @Published var watchRuntimeSnapshot: WatchRuntimeSnapshot = .unavailable
+    @Published var watchSetupCompleted = false
+    @Published var isPreparingWatch = false
+    @Published var audioRuntimeSnapshot: AudioRuntimeSnapshot = .inactive
 
     let eventBus = EventBus.shared
 
@@ -35,15 +39,34 @@ final class AppModel: ObservableObject {
     private let interactionProvider: LiveInteractionProvider
     private let audioProvider: AudioProvider
     private let watchProvider: WatchProvider
+    private let passivePhysiologyProvider: PassivePhysiologyProvider
+    private let watchAutoStopDelaySeconds: TimeInterval
 
     private var routeRunner: RouteRunner?
     private var recordingTask: Task<Void, Never>?
+    private var audioMonitoringTask: Task<Void, Never>?
     private var watchPollingTask: Task<Void, Never>?
+    private var watchSetupPollingTask: Task<Void, Never>?
+    private var physiologyPollingTask: Task<Void, Never>?
     private var eventSubscriptionID: UUID?
     private var nextWindowId = 0
     private var lastWindowBoundary: Date?
-    private var lastWatchReachable: Bool?
     private var hasBootstrapped = false
+    private var lastWatchRuntimeSnapshot: WatchRuntimeSnapshot?
+    private var lastAudioRuntimeSnapshot: AudioRuntimeSnapshot?
+    private var sawWatchStartAck = false
+    private var sawWatchWorkoutStarted = false
+    private var sawWatchMirrorConnected = false
+    private var sawFirstWatchWindow = false
+    private var didEmitNoAckTimeout = false
+    private var didEmitNoFirstPacketTimeout = false
+    private var didEmitWatchCompanionMissing = false
+    private var pendingWatchSessionStart = false
+    private var hasIssuedWatchStartForCurrentSession = false
+    private var lastIssuedWatchCommandKind: WatchSyncCommand.Command?
+    private var watchStartCommandIssuedAt: Date?
+    private var watchAutoStopTask: Task<Void, Never>?
+    private var didAutoStopWatchForCurrentSession = false
 
     /// App-level error type for UI display
     struct AppError: Identifiable, Equatable {
@@ -65,7 +88,9 @@ final class AppModel: ObservableObject {
         motionProvider: LiveMotionProvider = LiveMotionProvider(),
         interactionProvider: LiveInteractionProvider = LiveInteractionProvider(),
         audioProvider: AudioProvider = LiveAudioProvider(),
-        watchProvider: WatchProvider = LiveWatchProvider()
+        watchProvider: WatchProvider = LiveWatchProvider(),
+        passivePhysiologyProvider: PassivePhysiologyProvider = LivePassivePhysiologyProvider(),
+        watchAutoStopDelaySeconds: TimeInterval = 10 * 60
     ) {
         self.repository = repository
         self.settingsStore = settingsStore
@@ -76,12 +101,15 @@ final class AppModel: ObservableObject {
         self.interactionProvider = interactionProvider
         self.audioProvider = audioProvider
         self.watchProvider = watchProvider
+        self.passivePhysiologyProvider = passivePhysiologyProvider
+        self.watchAutoStopDelaySeconds = watchAutoStopDelaySeconds
     }
 
     func bootstrapIfNeeded() async {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
         settings = await settingsStore.load()
+        watchSetupCompleted = await settingsStore.loadWatchSetupCompleted()
         deviceCondition = await healthKitService.detectDeviceCondition()
 
         let sleepSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
@@ -90,24 +118,112 @@ final class AppModel: ObservableObject {
         let heartRateSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
             ? []
             : await healthKitService.fetchRecentHeartRateSamples()
+        let hrvSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
+            ? []
+            : await healthKitService.fetchRecentHRVSamples()
         priorSnapshot = PriorComputer.compute(
             sleepSamples: sleepSamples,
             heartRateSamples: heartRateSamples,
+            hrvSamples: hrvSamples,
             settings: settings,
             hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
         )
+        updateAudioRuntimeState(recordEvents: false)
+        updateWatchRuntimeState(recordEvents: false)
+        drainWatchDiagnostics(recordEvents: false)
 
         _ = try? await repository.recoverInterruptedSessions(now: Date())
         try? await truthRefillService.refillPendingTruths()
         await reloadBundles()
     }
 
+    var watchSetupState: WatchSetupState {
+        if !watchRuntimeSnapshot.isPaired {
+            return .notPaired
+        }
+        if !watchRuntimeSnapshot.isWatchAppInstalled {
+            return .notInstalled
+        }
+        if isWatchReadyForRealtime(watchRuntimeSnapshot) || watchSetupCompleted {
+            return .ready
+        }
+        return .authorizationRequired
+    }
+
+    var watchSetupStatusText: String {
+        if !watchRuntimeSnapshot.isPaired {
+            return WatchSetupState.notPaired.rawValue
+        }
+        if !watchRuntimeSnapshot.isWatchAppInstalled {
+            return WatchSetupState.notInstalled.rawValue
+        }
+        if isWatchReadyForRealtime(watchRuntimeSnapshot) || watchSetupCompleted {
+            return WatchSetupState.ready.rawValue
+        }
+        if watchRuntimeSnapshot.runtimeState == .authorizationRequired {
+            return WatchSetupState.authorizationRequired.rawValue
+        }
+        if isPreparingWatch {
+            return "Preparing Watch"
+        }
+        return "Needs Preparation"
+    }
+
+    var watchSetupGuidance: String {
+        switch watchSetupState {
+        case .notPaired:
+            return "Pair an Apple Watch with this iPhone first. Route E cannot run without a paired watch."
+        case .notInstalled:
+            return "Install the watch companion from the iPhone Watch app once. After that, use Prepare Watch to finish authorization."
+        case .authorizationRequired:
+            if watchRuntimeSnapshot.runtimeState == .authorizationRequired {
+                return "Open the watch app and approve Health access once. After authorization, future starts can be initiated from iPhone."
+            }
+            if isPreparingWatch {
+                return "Watch preparation is in progress. If nothing changes, open the watch app once and complete any pending authorization."
+            }
+            return "Run Prepare Watch once before the first realtime test so the watch app can authorize Health access."
+        case .ready:
+            return "Watch authorization is complete. You can start future recording sessions from iPhone."
+        }
+    }
+
+    var canPrepareWatch: Bool {
+        watchRuntimeSnapshot.isPaired &&
+        watchRuntimeSnapshot.isWatchAppInstalled &&
+        !isPreparingWatch &&
+        !isWatchReadyForRealtime(watchRuntimeSnapshot) &&
+        currentSession == nil
+    }
+
     func handleScenePhase(_ phase: ScenePhase) async {
+        let phaseLabel = scenePhaseLabel(for: phase)
+        if currentSession != nil {
+            postDiagnosticEvent(
+                "system.scenePhaseChanged",
+                payload: [
+                    "phase": phaseLabel
+                ]
+            )
+        }
+
         switch phase {
         case .active:
+            if currentSession != nil {
+                audioProvider.ensureRunning(reason: "scenePhase:\(phaseLabel)")
+            }
             deviceCondition = await healthKitService.detectDeviceCondition()
+            updateAudioRuntimeState(recordEvents: currentSession != nil)
+            updateWatchRuntimeState(recordEvents: currentSession != nil)
+            drainWatchDiagnostics(recordEvents: currentSession != nil)
+            drainPassivePhysiologyDiagnostics(recordEvents: currentSession != nil)
             try? await truthRefillService.refillPendingTruths()
             await reloadBundles()
+        case .inactive, .background:
+            if currentSession != nil {
+                await flushCurrentWindow(final: false)
+                updateAudioRuntimeState(recordEvents: true)
+            }
         default:
             break
         }
@@ -133,6 +249,8 @@ final class AppModel: ObservableObject {
             }
         }
         deviceCondition = await healthKitService.detectDeviceCondition()
+        updateAudioRuntimeState(recordEvents: false)
+        updateWatchRuntimeState(recordEvents: false)
 
         let start = Date()
         var sessionDeviceCondition = deviceCondition
@@ -224,36 +342,49 @@ final class AppModel: ObservableObject {
             ))
         }
 
-        do {
-            try watchProvider.start(session: session)
-        } catch let error as SensorProviderError {
-            sessionDeviceCondition.hasWatch = false
-            sessionDeviceCondition.watchReachable = false
+        let initialWatchSnapshot = watchProvider.runtimeSnapshot()
+        sessionDeviceCondition.hasWatch = initialWatchSnapshot.isPaired
+        sessionDeviceCondition.watchReachable = initialWatchSnapshot.isReachable
+
+        if !initialWatchSnapshot.isPaired {
             disabledFeatures.append("watchUnavailable")
-            startupWarnings.append("Watch connection unavailable. Route E will use iPhone-only evidence.")
+            startupWarnings.append("Apple Watch is not paired. Route E will remain unavailable for this session.")
             eventBus.post(RouteEvent(
                 routeId: .A,
                 eventType: "system.sessionStartDegraded",
                 payload: [
                     "provider": "watch",
-                    "error": error.localizedDescription
+                    "error": "notPaired"
                 ]
             ))
-        } catch {
-            sessionDeviceCondition.hasWatch = false
-            sessionDeviceCondition.watchReachable = false
-            disabledFeatures.append("watchUnavailable")
-            startupWarnings.append("Watch connection failed to start. Route E will use iPhone-only evidence.")
+        } else if !initialWatchSnapshot.isWatchAppInstalled {
+            startupWarnings.append("Watch companion app is not installed. Route E will wait until the watch app is installed and prepared.")
             eventBus.post(RouteEvent(
                 routeId: .A,
                 eventType: "system.sessionStartDegraded",
                 payload: [
                     "provider": "watch",
+                    "error": "companionMissing"
+                ]
+            ))
+        }
+
+        do {
+            try passivePhysiologyProvider.start(session: session)
+        } catch {
+            startupWarnings.append("HealthKit passive live provider failed to start. Route F may remain unavailable.")
+            eventBus.post(RouteEvent(
+                routeId: .F,
+                eventType: "system.sessionStartDegraded",
+                payload: [
+                    "provider": "healthkitPassive",
                     "error": error.localizedDescription
                 ]
             ))
         }
 
+        updateAudioRuntimeState(recordEvents: false)
+        drainPassivePhysiologyDiagnostics(recordEvents: false)
         session.deviceCondition = sessionDeviceCondition
         session.disabledFeatures = Array(NSOrderedSet(array: disabledFeatures)) as? [String] ?? disabledFeatures
         deviceCondition = sessionDeviceCondition
@@ -271,15 +402,8 @@ final class AppModel: ObservableObject {
         recentWindows = []
         nextWindowId = 0
         lastWindowBoundary = start
-        lastWatchReachable = deviceCondition.watchReachable
         eventBus.reset()
-        updateWatchConnectivityState()
-
-        let runner = RouteRunner(engines: makeRouteEngines())
-        routeRunner = runner
-        runner.start(session: session, priors: priorSnapshot.routePriors)
-        activePredictions = runner.currentPredictions()
-        try? await repository.savePredictions(activePredictions, for: session.sessionId)
+        resetWatchStartupTracking()
 
         eventSubscriptionID = eventBus.subscribe { [weak self] event in
             guard let self, let sessionId = self.currentSession?.sessionId else { return }
@@ -287,6 +411,35 @@ final class AppModel: ObservableObject {
                 try? await self.repository.appendEvent(event, to: sessionId)
             }
         }
+
+        beginWatchRealtimeIfNeeded(for: session, recordEvents: true)
+        updateAudioRuntimeState(recordEvents: true)
+        updateWatchRuntimeState(recordEvents: true)
+        drainWatchDiagnostics(recordEvents: true)
+        drainPassivePhysiologyDiagnostics(recordEvents: true)
+
+        postDiagnosticEvent(
+            "system.sessionInitialized",
+            payload: [
+                "hasWatch": String(session.deviceCondition.hasWatch),
+                "hasMotionAccess": String(session.deviceCondition.hasMotionAccess),
+                "hasMicrophoneAccess": String(session.deviceCondition.hasMicrophoneAccess),
+                "watchReachable": String(session.deviceCondition.watchReachable),
+                "audioEngineRunning": String(audioRuntimeSnapshot.engineIsRunning),
+                "audioTapInstalled": String(audioRuntimeSnapshot.tapInstalled),
+                "audioRestartCount": "\(audioRuntimeSnapshot.restartCount)",
+                "watchRuntimeState": watchRuntimeSnapshot.runtimeState.rawValue,
+                "watchTransportMode": watchRuntimeSnapshot.transportMode.rawValue,
+                "disabledFeatures": session.disabledFeatures.joined(separator: "|")
+            ]
+        )
+
+        let runner = RouteRunner(engines: makeRouteEngines())
+        routeRunner = runner
+        runner.start(session: session, priors: priorSnapshot.routePriors)
+        activePredictions = runner.currentPredictions()
+        try? await repository.savePredictions(activePredictions, for: session.sessionId)
+        postPredictionSnapshot()
 
         recordingTask = Task { [weak self] in
             guard let self else { return }
@@ -296,11 +449,28 @@ final class AppModel: ObservableObject {
             }
         }
 
+        audioMonitoringTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                self.audioProvider.ensureRunning(reason: "appAudioWatchdog")
+                self.updateAudioRuntimeState(recordEvents: true)
+            }
+        }
+
         watchPollingTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
+                try? await Task.sleep(for: .seconds(5))
                 await self.flushPendingWatchWindows()
+            }
+        }
+
+        physiologyPollingTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                await self.flushPendingPhysiologyWindows()
             }
         }
     }
@@ -310,16 +480,24 @@ final class AppModel: ObservableObject {
 
         recordingTask?.cancel()
         recordingTask = nil
+        audioMonitoringTask?.cancel()
+        audioMonitoringTask = nil
         watchPollingTask?.cancel()
         watchPollingTask = nil
+        watchSetupPollingTask?.cancel()
+        watchSetupPollingTask = nil
+        physiologyPollingTask?.cancel()
+        physiologyPollingTask = nil
 
         await flushPendingWatchWindows()
+        await flushPendingPhysiologyWindows()
         await flushCurrentWindow(final: true)
 
         motionProvider.stop()
         interactionProvider.stop()
         audioProvider.stop()
         watchProvider.stop()
+        passivePhysiologyProvider.stop()
 
         routeRunner?.stop()
         routeRunner = nil
@@ -338,6 +516,11 @@ final class AppModel: ObservableObject {
         }
 
         currentSession = nil
+        resetWatchStartupTracking()
+        updateAudioRuntimeState(recordEvents: false)
+        updateWatchRuntimeState(recordEvents: false)
+        drainWatchDiagnostics(recordEvents: false)
+        drainPassivePhysiologyDiagnostics(recordEvents: false)
         await reloadBundles()
     }
 
@@ -370,9 +553,13 @@ final class AppModel: ObservableObject {
         let heartRateSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
             ? []
             : await healthKitService.fetchRecentHeartRateSamples()
+        let hrvSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
+            ? []
+            : await healthKitService.fetchRecentHRVSamples()
         priorSnapshot = PriorComputer.compute(
             sleepSamples: sleepSamples,
             heartRateSamples: heartRateSamples,
+            hrvSamples: hrvSamples,
             settings: settings,
             hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
         )
@@ -384,9 +571,11 @@ final class AppModel: ObservableObject {
         deviceCondition = await healthKitService.detectDeviceCondition()
         let sleepSamples = granted ? await healthKitService.fetchRecentSleepSamples() : []
         let heartRateSamples = granted ? await healthKitService.fetchRecentHeartRateSamples() : []
+        let hrvSamples = granted ? await healthKitService.fetchRecentHRVSamples() : []
         priorSnapshot = PriorComputer.compute(
             sleepSamples: sleepSamples,
             heartRateSamples: heartRateSamples,
+            hrvSamples: hrvSamples,
             settings: settings,
             hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
         )
@@ -413,6 +602,30 @@ final class AppModel: ObservableObject {
                 severity: .warning
             )
         }
+    }
+
+    func prepareWatch() async {
+        await bootstrapIfNeeded()
+        updateWatchRuntimeState(recordEvents: true)
+        drainWatchDiagnostics(recordEvents: true)
+
+        let snapshot = watchRuntimeSnapshot
+        guard snapshot.isPaired else {
+            emitWatchSetupBlocked(reason: "notPaired", snapshot: snapshot)
+            return
+        }
+        guard snapshot.isWatchAppInstalled else {
+            emitWatchSetupBlocked(reason: "notInstalled", snapshot: snapshot)
+            return
+        }
+        guard !isWatchReadyForRealtime(snapshot), !watchSetupCompleted else {
+            isPreparingWatch = false
+            stopWatchSetupPolling()
+            return
+        }
+
+        let sessionId = currentSession?.sessionId ?? UUID()
+        beginWatchPrepareFlow(sessionId: sessionId, recordEvents: true)
     }
 
     func exportSummary() async {
@@ -486,6 +699,166 @@ final class AppModel: ObservableObject {
         sessionBundles = (try? await repository.loadBundles()) ?? []
     }
 
+    private func isWatchReadyForRealtime(_ snapshot: WatchRuntimeSnapshot) -> Bool {
+        snapshot.runtimeState == .readyForRealtime ||
+        snapshot.runtimeState == .workoutStarted ||
+        snapshot.runtimeState == .mirrorConnected ||
+        snapshot.lastWindowAt != nil
+    }
+
+    private func persistWatchSetupCompleted(_ completed: Bool) {
+        guard watchSetupCompleted != completed else { return }
+        watchSetupCompleted = completed
+        Task {
+            await settingsStore.saveWatchSetupCompleted(completed)
+        }
+    }
+
+    private func syncWatchSetupCompletion(with snapshot: WatchRuntimeSnapshot) {
+        if !snapshot.isPaired || !snapshot.isWatchAppInstalled || snapshot.runtimeState == .authorizationRequired {
+            persistWatchSetupCompleted(false)
+            return
+        }
+        if isWatchReadyForRealtime(snapshot) {
+            persistWatchSetupCompleted(true)
+        }
+    }
+
+    private func emitWatchSetupBlocked(reason: String, snapshot: WatchRuntimeSnapshot) {
+        eventBus.post(
+            RouteEvent(
+                routeId: .E,
+                eventType: "custom.watchSetupBlocked",
+                payload: [
+                    "reason": reason,
+                    "activationState": snapshot.activationState.rawValue,
+                    "runtimeState": snapshot.runtimeState.rawValue,
+                    "transportMode": snapshot.transportMode.rawValue,
+                    "isReachable": String(snapshot.isReachable),
+                    "lastError": snapshot.lastError ?? ""
+                ]
+            )
+        )
+    }
+
+    private func startWatchSetupPolling(recordEvents: Bool) {
+        watchSetupPollingTask?.cancel()
+        watchSetupPollingTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                if self.currentSession != nil {
+                    await self.flushPendingWatchWindows()
+                } else {
+                    self.updateWatchRuntimeState(recordEvents: recordEvents)
+                    self.drainWatchDiagnostics(recordEvents: recordEvents)
+                }
+                if !self.isPreparingWatch && !self.pendingWatchSessionStart {
+                    self.watchSetupPollingTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopWatchSetupPolling() {
+        watchSetupPollingTask?.cancel()
+        watchSetupPollingTask = nil
+    }
+
+    private func beginWatchPrepareFlow(sessionId: UUID, recordEvents: Bool) {
+        isPreparingWatch = true
+        lastIssuedWatchCommandKind = .prepareRuntime
+        startWatchSetupPolling(recordEvents: recordEvents)
+
+        do {
+            try watchProvider.prepareRuntime(sessionId: sessionId)
+            updateWatchRuntimeState(recordEvents: recordEvents)
+            drainWatchDiagnostics(recordEvents: recordEvents)
+        } catch {
+            isPreparingWatch = false
+            pendingWatchSessionStart = false
+            stopWatchSetupPolling()
+            let snapshot = watchProvider.runtimeSnapshot()
+            emitWatchSetupBlocked(reason: "prepareFailed", snapshot: snapshot)
+            Task {
+                await reportError(
+                    title: "Prepare Watch Failed",
+                    message: error.localizedDescription,
+                    severity: .warning
+                )
+            }
+        }
+    }
+
+    private func issueWatchStartIfNeeded(for session: Session, recordEvents: Bool) {
+        guard !hasIssuedWatchStartForCurrentSession else { return }
+        let commandIssuedAt = Date()
+        resetWatchStartCommandTracking()
+        lastIssuedWatchCommandKind = .startSession
+
+        do {
+            try watchProvider.start(session: session)
+            hasIssuedWatchStartForCurrentSession = true
+            pendingWatchSessionStart = false
+            isPreparingWatch = false
+            watchStartCommandIssuedAt = commandIssuedAt
+            updateWatchRuntimeState(recordEvents: recordEvents)
+            drainWatchDiagnostics(recordEvents: recordEvents)
+            stopWatchSetupPolling()
+        } catch {
+            hasIssuedWatchStartForCurrentSession = false
+            pendingWatchSessionStart = false
+            isPreparingWatch = false
+            stopWatchSetupPolling()
+            let snapshot = watchProvider.runtimeSnapshot()
+            emitWatchSetupBlocked(reason: "startFailed", snapshot: snapshot)
+            Task {
+                await reportError(
+                    title: "Watch Start Failed",
+                    message: error.localizedDescription,
+                    severity: .warning
+                )
+            }
+        }
+    }
+
+    private func beginWatchRealtimeIfNeeded(for session: Session, recordEvents: Bool) {
+        let snapshot = watchProvider.runtimeSnapshot()
+        applyWatchRuntimeSnapshot(snapshot, recordEvents: recordEvents)
+        drainWatchDiagnostics(recordEvents: recordEvents)
+
+        guard snapshot.isPaired else {
+            pendingWatchSessionStart = false
+            isPreparingWatch = false
+            stopWatchSetupPolling()
+            emitWatchSetupBlocked(reason: "notPaired", snapshot: snapshot)
+            return
+        }
+
+        guard snapshot.isWatchAppInstalled else {
+            pendingWatchSessionStart = false
+            isPreparingWatch = false
+            stopWatchSetupPolling()
+            emitWatchSetupBlocked(reason: "notInstalled", snapshot: snapshot)
+            return
+        }
+
+        let shouldUseDirectStartBootstrap =
+            watchSetupCompleted &&
+            snapshot.runtimeState != .authorizationRequired
+
+        if isWatchReadyForRealtime(snapshot) || shouldUseDirectStartBootstrap {
+            issueWatchStartIfNeeded(for: session, recordEvents: recordEvents)
+            return
+        }
+
+        pendingWatchSessionStart = true
+        hasIssuedWatchStartForCurrentSession = false
+        beginWatchPrepareFlow(sessionId: session.sessionId, recordEvents: recordEvents)
+    }
+
     private func flushCurrentWindow(final: Bool) async {
         guard let session = currentSession else { return }
         let end = Date()
@@ -495,6 +868,7 @@ final class AppModel: ObservableObject {
         let duration = end.timeIntervalSince(start)
         let motion = motionProvider.drainMotionFeatures(windowDuration: duration)
         let audio = audioProvider.consumeWindow(windowDuration: duration)
+        updateAudioRuntimeState(recordEvents: true)
         let interaction = interactionProvider.consumeWindow(now: end)
         let window = FeatureWindow(
             windowId: nextWindowId,
@@ -507,6 +881,22 @@ final class AppModel: ObservableObject {
             interaction: interaction,
             watch: nil
         )
+
+        postDiagnosticEvent(
+            "system.windowPrepared",
+            payload: diagnosticPayload(for: window, final: final)
+        )
+        if window.source == .iphone, window.duration > 90 {
+            postDiagnosticEvent(
+                "system.windowOversized",
+                payload: [
+                    "windowId": "\(window.windowId)",
+                    "durationSec": String(format: "%.1f", window.duration),
+                    "startTime": window.startTime.csvTimestamp,
+                    "endTime": window.endTime.csvTimestamp
+                ]
+            )
+        }
 
         nextWindowId += 1
         lastWindowBoundary = end
@@ -522,14 +912,30 @@ final class AppModel: ObservableObject {
         guard let sessionId = currentSession?.sessionId else { return }
         let watchWindows = watchProvider.drainPendingWindows()
         guard !watchWindows.isEmpty else {
-            updateWatchConnectivityState()
+            updateWatchRuntimeState(recordEvents: true)
+            drainWatchDiagnostics(recordEvents: true)
             return
         }
 
         for window in watchWindows {
             await processWindow(window, sessionId: sessionId)
         }
-        updateWatchConnectivityState()
+        updateWatchRuntimeState(recordEvents: true)
+        drainWatchDiagnostics(recordEvents: true)
+    }
+
+    private func flushPendingPhysiologyWindows() async {
+        guard let sessionId = currentSession?.sessionId else { return }
+        let physiologyWindows = passivePhysiologyProvider.drainPendingWindows()
+        guard !physiologyWindows.isEmpty else {
+            drainPassivePhysiologyDiagnostics(recordEvents: true)
+            return
+        }
+
+        for window in physiologyWindows {
+            await processWindow(window, sessionId: sessionId)
+        }
+        drainPassivePhysiologyDiagnostics(recordEvents: true)
     }
 
     private func processWindow(_ window: FeatureWindow, sessionId: UUID) async {
@@ -544,6 +950,9 @@ final class AppModel: ObservableObject {
                     ]
                 )
             )
+        }
+        if window.source == .watch {
+            sawFirstWatchWindow = true
         }
         recentWindows = Array(([window] + recentWindows).prefix(20))
 
@@ -567,8 +976,11 @@ final class AppModel: ObservableObject {
             ))
         }
 
+        let previousRouteEPrediction = activePredictions.first { $0.routeId == .E }
         routeRunner?.process(window: window)
         activePredictions = routeRunner?.currentPredictions() ?? activePredictions
+        syncWatchAutoStopState(previousRouteEPrediction: previousRouteEPrediction, sessionId: sessionId)
+        postPredictionSnapshot()
 
         // Handle prediction save errors
         do {
@@ -582,23 +994,621 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func updateWatchConnectivityState() {
-        let connectivity = watchProvider.connectivitySnapshot()
-        if let previous = lastWatchReachable, previous != connectivity.isReachable {
+    private func updateWatchRuntimeState(recordEvents: Bool) {
+        applyWatchRuntimeSnapshot(watchProvider.runtimeSnapshot(), recordEvents: recordEvents)
+    }
+
+    private func syncWatchAutoStopState(previousRouteEPrediction: RoutePrediction?, sessionId: UUID) {
+        guard currentSession?.sessionId == sessionId else { return }
+        guard let routeEPrediction = activePredictions.first(where: { $0.routeId == .E }) else {
+            cancelWatchAutoStop(reason: "routeEMissing")
+            return
+        }
+
+        if routeEPrediction.confidence == .confirmed {
+            guard previousRouteEPrediction?.confidence != .confirmed else { return }
+            guard !didAutoStopWatchForCurrentSession else { return }
+            guard watchAutoStopTask == nil else { return }
+            scheduleWatchAutoStop(for: sessionId, prediction: routeEPrediction)
+            return
+        }
+
+        cancelWatchAutoStop(reason: "routeENotConfirmed")
+    }
+
+    private func scheduleWatchAutoStop(for sessionId: UUID, prediction: RoutePrediction) {
+        let delaySeconds = max(watchAutoStopDelaySeconds, 0)
+        eventBus.post(
+            RouteEvent(
+                routeId: .E,
+                eventType: "custom.watchAutoStopScheduled",
+                payload: [
+                    "sessionId": sessionId.uuidString,
+                    "delaySec": "\(Int(delaySeconds.rounded()))",
+                    "predictedTime": prediction.predictedSleepOnset.map { ISO8601DateFormatter.cached.string(from: $0) } ?? ""
+                ]
+            )
+        )
+
+        watchAutoStopTask = Task { [weak self] in
+            if delaySeconds > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            await self?.executeWatchAutoStopIfNeeded(for: sessionId)
+        }
+    }
+
+    private func executeWatchAutoStopIfNeeded(for sessionId: UUID) async {
+        defer { watchAutoStopTask = nil }
+
+        guard currentSession?.sessionId == sessionId else { return }
+        guard !didAutoStopWatchForCurrentSession else { return }
+        guard let routeEPrediction = activePredictions.first(where: { $0.routeId == .E }),
+              routeEPrediction.confidence == .confirmed else {
             eventBus.post(
                 RouteEvent(
                     routeId: .E,
-                    eventType: connectivity.isReachable ? "custom.watchConnected" : "custom.watchDisconnected",
+                    eventType: "custom.watchAutoStopCancelled",
                     payload: [
-                        "watchReachable": String(connectivity.isReachable),
-                        "dataQuality": connectivity.isReachable ? "good" : "partial"
+                        "sessionId": sessionId.uuidString,
+                        "reason": "routeENotConfirmedAtDeadline"
+                    ]
+                )
+            )
+            return
+        }
+
+        watchProvider.stop()
+        didAutoStopWatchForCurrentSession = true
+
+        eventBus.post(
+            RouteEvent(
+                routeId: .E,
+                eventType: "custom.watchAutoStopped",
+                payload: [
+                    "sessionId": sessionId.uuidString,
+                    "delaySec": "\(Int(max(watchAutoStopDelaySeconds, 0).rounded()))",
+                    "predictedTime": routeEPrediction.predictedSleepOnset.map { ISO8601DateFormatter.cached.string(from: $0) } ?? ""
+                ]
+            )
+        )
+    }
+
+    private func cancelWatchAutoStop(reason: String, emitEvent: Bool = true) {
+        guard watchAutoStopTask != nil else { return }
+        watchAutoStopTask?.cancel()
+        watchAutoStopTask = nil
+
+        guard emitEvent, let sessionId = currentSession?.sessionId else { return }
+        eventBus.post(
+            RouteEvent(
+                routeId: .E,
+                eventType: "custom.watchAutoStopCancelled",
+                payload: [
+                    "sessionId": sessionId.uuidString,
+                    "reason": reason
+                ]
+            )
+        )
+    }
+
+    private func resetWatchAutoStopState() {
+        cancelWatchAutoStop(reason: "reset", emitEvent: false)
+        didAutoStopWatchForCurrentSession = false
+    }
+
+    private func applyWatchRuntimeSnapshot(_ snapshot: WatchRuntimeSnapshot, recordEvents: Bool) {
+        let previous = lastWatchRuntimeSnapshot
+
+        watchRuntimeSnapshot = snapshot
+        deviceCondition.hasWatch = snapshot.isPaired
+        deviceCondition.watchReachable = snapshot.isReachable
+
+        if var session = currentSession {
+            session.deviceCondition.hasWatch = snapshot.isPaired
+            session.deviceCondition.watchReachable = snapshot.isReachable
+            currentSession = session
+        }
+
+        syncWatchStartupFlags(with: snapshot)
+        syncWatchSetupCompletion(with: snapshot)
+
+        if snapshot.runtimeState == .authorizationRequired {
+            isPreparingWatch = true
+        }
+        if isWatchReadyForRealtime(snapshot) || snapshot.runtimeState == .stopped {
+            isPreparingWatch = false
+        }
+        if !snapshot.isPaired || !snapshot.isWatchAppInstalled {
+            isPreparingWatch = false
+            pendingWatchSessionStart = false
+        }
+
+        let shouldAutoStartCurrentSession =
+            recordEvents &&
+            currentSession != nil &&
+            pendingWatchSessionStart &&
+            !hasIssuedWatchStartForCurrentSession &&
+            isWatchReadyForRealtime(snapshot)
+
+        guard recordEvents else {
+            lastWatchRuntimeSnapshot = snapshot
+            return
+        }
+
+        if previous != snapshot {
+            postDiagnosticEvent("system.watchRuntimeSnapshot", payload: snapshot.eventPayload)
+        }
+
+        if snapshot.isPaired, !snapshot.isWatchAppInstalled, !didEmitWatchCompanionMissing {
+            didEmitWatchCompanionMissing = true
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchCompanionMissing",
+                    payload: [
+                        "activationState": snapshot.activationState.rawValue,
+                        "runtimeState": snapshot.runtimeState.rawValue,
+                        "transportMode": snapshot.transportMode.rawValue,
+                        "isReachable": String(snapshot.isReachable)
+                    ]
+                )
+            )
+        } else if snapshot.isWatchAppInstalled {
+            didEmitWatchCompanionMissing = false
+        }
+
+        if previous?.runtimeState != .launchRequested, snapshot.runtimeState == .launchRequested {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchLaunchRequested",
+                    payload: [
+                        "transportMode": snapshot.transportMode.rawValue
                     ]
                 )
             )
         }
-        lastWatchReachable = connectivity.isReachable
-        deviceCondition.hasWatch = connectivity.isPaired
-        deviceCondition.watchReachable = connectivity.isReachable
+
+        if previous?.lastCommandAt != snapshot.lastCommandAt, let lastCommandAt = snapshot.lastCommandAt {
+            switch lastIssuedWatchCommandKind {
+            case .prepareRuntime:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchSetupStarted",
+                        payload: [
+                            "time": lastCommandAt.csvTimestamp,
+                            "transportMode": snapshot.transportMode.rawValue
+                        ]
+                    )
+                )
+            case .startSession:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchStartCommandSent",
+                        payload: [
+                            "time": lastCommandAt.csvTimestamp,
+                            "transportMode": snapshot.transportMode.rawValue
+                        ]
+                    )
+                )
+            case .stopSession, .none:
+                break
+            }
+        }
+
+        if previous?.lastAckAt != snapshot.lastAckAt,
+           let lastAckAt = snapshot.lastAckAt,
+           lastIssuedWatchCommandKind == .startSession {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchStartAcked",
+                    payload: [
+                        "time": lastAckAt.csvTimestamp,
+                        "transportMode": snapshot.transportMode.rawValue
+                    ]
+                )
+            )
+        }
+
+        if previous?.runtimeState != snapshot.runtimeState {
+            switch snapshot.runtimeState {
+            case .readyForRealtime:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchSetupReady",
+                        payload: [
+                            "transportMode": snapshot.transportMode.rawValue
+                        ]
+                    )
+                )
+            case .workoutStarted:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchWorkoutStarted",
+                        payload: [
+                            "transportMode": snapshot.transportMode.rawValue
+                        ]
+                    )
+                )
+            case .authorizationRequired:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchAuthorizationRequired",
+                        payload: [
+                            "transportMode": snapshot.transportMode.rawValue,
+                            "lastError": snapshot.lastError ?? "HealthKit authorization required on watch."
+                        ]
+                    )
+                )
+            case .workoutFailed:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchWorkoutFailed",
+                        payload: [
+                            "transportMode": snapshot.transportMode.rawValue,
+                            "lastError": snapshot.lastError ?? "unknown"
+                        ]
+                    )
+                )
+            case .mirrorConnected:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchMirrorConnected",
+                        payload: [
+                            "transportMode": snapshot.transportMode.rawValue
+                        ]
+                    )
+                )
+            case .mirrorDisconnected:
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .E,
+                        eventType: "custom.watchMirrorDisconnected",
+                        payload: [
+                            "transportMode": snapshot.transportMode.rawValue,
+                            "lastError": snapshot.lastError ?? ""
+                        ]
+                    )
+                )
+            default:
+                break
+            }
+        } else if previous?.transportMode != .mirroredWorkoutSession,
+                  snapshot.transportMode == .mirroredWorkoutSession {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchMirrorConnected",
+                    payload: [
+                        "transportMode": snapshot.transportMode.rawValue
+                    ]
+                )
+            )
+        }
+
+        evaluateWatchStartupTimeouts(now: Date(), snapshot: snapshot)
+        lastWatchRuntimeSnapshot = snapshot
+
+        if shouldAutoStartCurrentSession, let session = currentSession {
+            issueWatchStartIfNeeded(for: session, recordEvents: true)
+        }
+
+        if !isPreparingWatch && !pendingWatchSessionStart {
+            stopWatchSetupPolling()
+        }
+    }
+
+    private func updateAudioRuntimeState(recordEvents: Bool) {
+        let snapshot = audioProvider.runtimeSnapshot()
+        let previous = lastAudioRuntimeSnapshot
+
+        audioRuntimeSnapshot = snapshot
+
+        guard recordEvents else {
+            lastAudioRuntimeSnapshot = snapshot
+            return
+        }
+
+        if previous != snapshot {
+            postDiagnosticEvent("system.audioRuntimeSnapshot", payload: snapshot.eventPayload)
+        }
+
+        if previous?.restartCount != snapshot.restartCount, snapshot.restartCount > 0 {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioCaptureRestarted",
+                    payload: [
+                        "restartCount": "\(snapshot.restartCount)",
+                        "reason": snapshot.lastRestartReason ?? "unknown",
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? ""
+                    ]
+                )
+            )
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioBackendRestarted",
+                    payload: [
+                        "restartCount": "\(snapshot.restartCount)",
+                        "reason": snapshot.lastRestartReason ?? "unknown",
+                        "backend": snapshot.captureBackendKind,
+                        "strategy": snapshot.sessionStrategy,
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? ""
+                    ]
+                )
+            )
+        }
+
+        if (previous?.consecutiveEmptyWindows ?? 0) < 2, snapshot.consecutiveEmptyWindows >= 2 {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioCaptureStalled",
+                    payload: [
+                        "emptyWindowStreak": "\(snapshot.consecutiveEmptyWindows)",
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? ""
+                    ]
+                )
+            )
+        }
+
+        if (previous?.frameStallCount ?? 0) < snapshot.frameStallCount {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioFrameFlowStalled",
+                    payload: [
+                        "frameStallCount": "\(snapshot.frameStallCount)",
+                        "reason": snapshot.lastFrameStallReason ?? "unknown",
+                        "gapSeconds": String(format: "%.2f", snapshot.lastObservedFrameGapSeconds),
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? "",
+                        "route": snapshot.lastKnownRoute ?? "",
+                        "captureGraphKind": snapshot.captureGraphKind,
+                        "keepAliveOutputEnabled": String(snapshot.keepAliveOutputEnabled)
+                    ]
+                )
+            )
+        }
+
+        if previous?.frameFlowIsStalled == true, snapshot.frameFlowIsStalled == false {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioFrameFlowRestored",
+                    payload: [
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? "",
+                        "recoveredAt": snapshot.lastFrameRecoveryAt?.csvTimestamp ?? "",
+                        "route": snapshot.lastKnownRoute ?? "",
+                        "captureGraphKind": snapshot.captureGraphKind,
+                        "keepAliveOutputEnabled": String(snapshot.keepAliveOutputEnabled)
+                    ]
+                )
+            )
+        }
+
+        if (previous?.routeLossWhileSessionActiveCount ?? 0) < snapshot.routeLossWhileSessionActiveCount {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioInputRouteLost",
+                    payload: [
+                        "routeLossCount": "\(snapshot.routeLossWhileSessionActiveCount)",
+                        "reason": snapshot.lastRouteLossReason ?? "unknown",
+                        "route": snapshot.lastKnownRoute ?? "",
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? "",
+                        "captureGraphKind": snapshot.captureGraphKind
+                    ]
+                )
+            )
+        }
+
+        if (previous?.hasInputRoute == false), snapshot.hasInputRoute {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioInputRouteRestored",
+                    payload: [
+                        "route": snapshot.lastKnownRoute ?? "",
+                        "lastFrameAt": snapshot.lastFrameAt?.csvTimestamp ?? "",
+                        "captureGraphKind": snapshot.captureGraphKind
+                    ]
+                )
+            )
+        }
+
+        if previous?.lastRepairDecision != snapshot.lastRepairDecision,
+           let decision = snapshot.lastRepairDecision {
+            if decision.hasPrefix("deferred") {
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .D,
+                        eventType: "custom.audioRepairDeferred",
+                        payload: [
+                            "decision": decision,
+                            "reason": snapshot.repairSuppressedReason ?? "",
+                            "backend": snapshot.captureBackendKind,
+                            "strategy": snapshot.sessionStrategy,
+                            "route": snapshot.lastKnownRoute ?? "",
+                            "activationContext": snapshot.lastActivationContext ?? ""
+                        ]
+                    )
+                )
+            } else if decision.hasPrefix("suppressed") {
+                eventBus.post(
+                    RouteEvent(
+                        routeId: .D,
+                        eventType: "custom.audioRepairSuppressed",
+                        payload: [
+                            "decision": decision,
+                            "reason": snapshot.repairSuppressedReason ?? "",
+                            "backend": snapshot.captureBackendKind,
+                            "strategy": snapshot.sessionStrategy,
+                            "route": snapshot.lastKnownRoute ?? "",
+                            "activationContext": snapshot.lastActivationContext ?? ""
+                        ]
+                    )
+                )
+            }
+        }
+
+        if previous?.lastError != snapshot.lastError, let lastError = snapshot.lastError {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .D,
+                    eventType: "custom.audioCaptureError",
+                    payload: [
+                        "error": lastError,
+                        "captureGraphKind": snapshot.captureGraphKind,
+                        "captureBackendKind": snapshot.captureBackendKind,
+                        "sessionStrategy": snapshot.sessionStrategy,
+                        "hasInputRoute": String(snapshot.hasInputRoute),
+                        "activationReason": snapshot.lastActivationReason ?? "",
+                        "activationContext": snapshot.lastActivationContext ?? "",
+                        "activationErrorDomain": snapshot.lastActivationErrorDomain ?? "",
+                        "activationErrorCode": snapshot.lastActivationErrorCode.map(String.init) ?? "",
+                        "interruptionReason": snapshot.lastInterruptionReason ?? "",
+                        "interruptionWasSuspended": String(snapshot.lastInterruptionWasSuspended),
+                        "route": snapshot.lastKnownRoute ?? "",
+                        "routeLossCount": "\(snapshot.routeLossWhileSessionActiveCount)",
+                        "lastRouteLossReason": snapshot.lastRouteLossReason ?? "",
+                        "frameFlowIsStalled": String(snapshot.frameFlowIsStalled),
+                        "frameStallCount": "\(snapshot.frameStallCount)",
+                        "lastFrameStallReason": snapshot.lastFrameStallReason ?? "",
+                        "lastObservedFrameGapSeconds": String(format: "%.2f", snapshot.lastObservedFrameGapSeconds),
+                        "keepAliveOutputEnabled": String(snapshot.keepAliveOutputEnabled),
+                        "outputRenderCount": "\(snapshot.outputRenderCount)",
+                        "lastOutputRenderAt": snapshot.lastOutputRenderAt?.csvTimestamp ?? "",
+                        "framesSinceLastWindow": "\(snapshot.framesSinceLastWindow)",
+                        "lastWindowFrameCount": "\(snapshot.lastWindowFrameCount)",
+                        "aggregatedIOPreferenceEnabled": String(snapshot.aggregatedIOPreferenceEnabled),
+                        "aggregatedIOPreferenceError": snapshot.aggregatedIOPreferenceError ?? "",
+                        "rawCaptureSegmentCount": "\(snapshot.rawCaptureSegmentCount)",
+                        "activeRawCaptureFileName": snapshot.activeRawCaptureFileName ?? "",
+                        "rawCaptureError": snapshot.rawCaptureError ?? "",
+                        "repairSuppressedReason": snapshot.repairSuppressedReason ?? "",
+                        "lastRepairDecision": snapshot.lastRepairDecision ?? "",
+                        "echoCancelledInputAvailable": String(snapshot.echoCancelledInputAvailable),
+                        "echoCancelledInputEnabled": String(snapshot.echoCancelledInputEnabled)
+                    ]
+                )
+            )
+        }
+
+        lastAudioRuntimeSnapshot = snapshot
+    }
+
+    private func resetWatchStartupTracking() {
+        resetWatchAutoStopState()
+        lastWatchRuntimeSnapshot = nil
+        lastAudioRuntimeSnapshot = nil
+        resetWatchStartCommandTracking()
+        watchSetupPollingTask?.cancel()
+        watchSetupPollingTask = nil
+        isPreparingWatch = false
+        pendingWatchSessionStart = false
+        hasIssuedWatchStartForCurrentSession = false
+        lastIssuedWatchCommandKind = nil
+        didEmitWatchCompanionMissing = false
+    }
+
+    private func resetWatchStartCommandTracking() {
+        sawWatchStartAck = false
+        sawWatchWorkoutStarted = false
+        sawWatchMirrorConnected = false
+        sawFirstWatchWindow = false
+        didEmitNoAckTimeout = false
+        didEmitNoFirstPacketTimeout = false
+        watchStartCommandIssuedAt = nil
+    }
+
+    private func drainWatchDiagnostics(recordEvents: Bool) {
+        guard recordEvents else {
+            _ = watchProvider.drainDiagnostics()
+            return
+        }
+
+        for diagnostic in watchProvider.drainDiagnostics() {
+            eventBus.post(diagnostic.event)
+        }
+    }
+
+    private func drainPassivePhysiologyDiagnostics(recordEvents: Bool) {
+        guard recordEvents else {
+            _ = passivePhysiologyProvider.drainDiagnostics()
+            return
+        }
+
+        for diagnostic in passivePhysiologyProvider.drainDiagnostics() {
+            eventBus.post(diagnostic)
+        }
+    }
+
+    private func syncWatchStartupFlags(with snapshot: WatchRuntimeSnapshot) {
+        if snapshot.lastAckAt != nil {
+            sawWatchStartAck = true
+        }
+        if snapshot.runtimeState == .workoutStarted {
+            sawWatchWorkoutStarted = true
+        }
+        if snapshot.runtimeState == .mirrorConnected || snapshot.transportMode == .mirroredWorkoutSession {
+            sawWatchMirrorConnected = true
+        }
+        if snapshot.lastWindowAt != nil {
+            sawFirstWatchWindow = true
+        }
+    }
+
+    private func evaluateWatchStartupTimeouts(now: Date, snapshot: WatchRuntimeSnapshot) {
+        guard watchStartCommandIssuedAt != nil else { return }
+        let elapsed = now.timeIntervalSince(watchStartCommandIssuedAt ?? now)
+
+        if !didEmitNoAckTimeout, !sawWatchStartAck, elapsed >= 15 {
+            didEmitNoAckTimeout = true
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchStartupTimeout",
+                    payload: [
+                        "reason": "noAck",
+                        "elapsedSec": "\(Int(elapsed))",
+                        "runtimeState": snapshot.runtimeState.rawValue,
+                        "transportMode": snapshot.transportMode.rawValue
+                    ]
+                )
+            )
+        }
+
+        if !didEmitNoFirstPacketTimeout,
+           !sawWatchWorkoutStarted,
+           !sawWatchMirrorConnected,
+           !sawFirstWatchWindow,
+           snapshot.runtimeState != .authorizationRequired,
+           elapsed >= 150 {
+            didEmitNoFirstPacketTimeout = true
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchStartupTimeout",
+                    payload: [
+                        "reason": "noFirstPacket",
+                        "elapsedSec": "\(Int(elapsed))",
+                        "runtimeState": snapshot.runtimeState.rawValue,
+                        "transportMode": snapshot.transportMode.rawValue
+                    ]
+                )
+            )
+        }
     }
 
     private func makeRouteEngines() -> [RouteEngine] {
@@ -607,11 +1617,67 @@ final class AppModel: ObservableObject {
             RouteBEngine(settings: settings),
             RouteCEngine(settings: settings),
             RouteDEngine(settings: settings),
-            RouteEEngine(settings: settings)
+            RouteEEngine(settings: settings),
+            RouteFEngine(settings: settings)
         ]
     }
 
     // MARK: - Error Reporting
+
+    private func scenePhaseLabel(for phase: ScenePhase) -> String {
+        switch phase {
+        case .active:
+            "active"
+        case .inactive:
+            "inactive"
+        case .background:
+            "background"
+        @unknown default:
+            "unknown"
+        }
+    }
+
+    private func diagnosticPayload(for window: FeatureWindow, final: Bool) -> [String: String] {
+        [
+            "windowId": "\(window.windowId)",
+            "source": window.source.rawValue,
+            "finalFlush": String(final),
+            "durationSec": String(format: "%.1f", window.duration),
+            "hasMotion": String(window.motion != nil),
+            "hasAudio": String(window.audio != nil),
+            "hasInteraction": String(window.interaction != nil),
+            "hasWatch": String(window.watch != nil),
+            "hasPhysiology": String(window.physiology != nil),
+            "startTime": window.startTime.csvTimestamp,
+            "endTime": window.endTime.csvTimestamp
+        ]
+    }
+
+    private func postPredictionSnapshot() {
+        guard !activePredictions.isEmpty else { return }
+        let summary = activePredictions
+            .map { prediction in
+                let onset = prediction.predictedSleepOnset?.formattedTime ?? "nil"
+                return "\(prediction.routeId.rawValue)=\(prediction.confidence.rawValue)/\(prediction.isAvailable ? "avail" : "unavail")@\(onset)"
+            }
+            .joined(separator: "; ")
+        postDiagnosticEvent(
+            "system.predictionSnapshot",
+            payload: [
+                "summary": summary
+            ]
+        )
+    }
+
+    private func postDiagnosticEvent(_ eventType: String, payload: [String: String] = [:]) {
+        eventBus.post(
+            RouteEvent(
+                routeId: .A,
+                eventType: eventType,
+                payload: payload
+            )
+        )
+    }
 
     private func reportError(title: String, message: String, severity: ErrorSeverity) async {
         let error = AppError(
@@ -673,3 +1739,62 @@ final class AppModel: ObservableObject {
         return "Replayed Route \(routeId.rawValue) for \(sessionDate): \(deltaString) min \(direction)"
     }
 }
+
+#if DEBUG
+extension AppModel {
+    func debugPrepareWatchStartupTracking(for session: Session) {
+        currentSession = session
+        resetWatchStartupTracking()
+        watchStartCommandIssuedAt = session.startTime
+        hasIssuedWatchStartForCurrentSession = true
+        lastIssuedWatchCommandKind = .startSession
+    }
+
+    func debugApplyWatchRuntimeSnapshot(_ snapshot: WatchRuntimeSnapshot, recordEvents: Bool = true) {
+        applyWatchRuntimeSnapshot(snapshot, recordEvents: recordEvents)
+    }
+
+    func debugEvaluateWatchStartupTimeouts(now: Date, snapshot: WatchRuntimeSnapshot) {
+        watchRuntimeSnapshot = snapshot
+        syncWatchStartupFlags(with: snapshot)
+        evaluateWatchStartupTimeouts(now: now, snapshot: snapshot)
+        lastWatchRuntimeSnapshot = snapshot
+    }
+
+    func debugPreparePendingWatchSessionStart(for session: Session) {
+        currentSession = session
+        resetWatchStartupTracking()
+        pendingWatchSessionStart = true
+        isPreparingWatch = true
+        hasIssuedWatchStartForCurrentSession = false
+        lastIssuedWatchCommandKind = .prepareRuntime
+    }
+
+    func debugSetWatchSetupCompleted(_ completed: Bool) {
+        watchSetupCompleted = completed
+    }
+
+    func debugBeginWatchRealtimeIfNeeded(for session: Session, recordEvents: Bool = true) {
+        beginWatchRealtimeIfNeeded(for: session, recordEvents: recordEvents)
+    }
+
+    func debugWatchSetupCompletedState() -> Bool {
+        watchSetupCompleted
+    }
+
+    func debugUpdatePredictionsForWatchAutoStop(_ predictions: [RoutePrediction], session: Session) {
+        currentSession = session
+        let previousRouteEPrediction = activePredictions.first { $0.routeId == .E }
+        activePredictions = predictions
+        syncWatchAutoStopState(previousRouteEPrediction: previousRouteEPrediction, sessionId: session.sessionId)
+    }
+
+    func debugIsWatchAutoStopScheduled() -> Bool {
+        watchAutoStopTask != nil
+    }
+
+    func debugDidAutoStopWatchForCurrentSession() -> Bool {
+        didAutoStopWatchForCurrentSession
+    }
+}
+#endif

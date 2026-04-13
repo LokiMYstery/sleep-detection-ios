@@ -58,7 +58,7 @@ enum EvaluationDimension: String, CaseIterable, Codable, Sendable {
 }
 
 enum SessionAnalytics {
-    static let trackedRouteIds: [RouteId] = [.A, .B, .C, .D, .E]
+    static let trackedRouteIds: [RouteId] = [.A, .B, .C, .D, .E, .F]
 
     static func overallRouteSummaries(from bundles: [SessionBundle]) -> [RouteEvaluationSummary] {
         trackedRouteIds.map { summarize(routeId: $0, bundles: bundles) }

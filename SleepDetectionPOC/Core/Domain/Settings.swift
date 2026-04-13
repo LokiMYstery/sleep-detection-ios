@@ -119,6 +119,12 @@ struct RouteDParameters: Codable, Equatable, Sendable {
     var audioQuietThreshold: Double
     var audioVarianceThreshold: Double
     var frictionEventThreshold: Int
+    var breathingMinPeriodicityScore: Double
+    var breathingMaxIntervalCV: Double
+    var playbackLeakageRejectThreshold: Double
+    var disturbanceRejectThreshold: Double
+    var snoreCandidateMinConfidence: Double
+    var snoreBoostWindowCount: Int
     var interactionQuietThresholdMinutes: Double
     var candidateWindowCount: Int
     var confirmWindowCount: Int
@@ -128,10 +134,81 @@ struct RouteDParameters: Codable, Equatable, Sendable {
         audioQuietThreshold: 0.02,
         audioVarianceThreshold: 0.0003,
         frictionEventThreshold: 1,
+        breathingMinPeriodicityScore: 0.43,
+        breathingMaxIntervalCV: 0.4,
+        playbackLeakageRejectThreshold: 0.68,
+        disturbanceRejectThreshold: 0.62,
+        snoreCandidateMinConfidence: 0.58,
+        snoreBoostWindowCount: 1,
         interactionQuietThresholdMinutes: 2,
         candidateWindowCount: 3,
         confirmWindowCount: 6
     )
+
+    private enum CodingKeys: String, CodingKey {
+        case motionStillnessThreshold
+        case audioQuietThreshold
+        case audioVarianceThreshold
+        case frictionEventThreshold
+        case breathingMinPeriodicityScore
+        case breathingMaxIntervalCV
+        case playbackLeakageRejectThreshold
+        case disturbanceRejectThreshold
+        case snoreCandidateMinConfidence
+        case snoreBoostWindowCount
+        case interactionQuietThresholdMinutes
+        case candidateWindowCount
+        case confirmWindowCount
+    }
+
+    init(
+        motionStillnessThreshold: Double,
+        audioQuietThreshold: Double,
+        audioVarianceThreshold: Double,
+        frictionEventThreshold: Int,
+        breathingMinPeriodicityScore: Double,
+        breathingMaxIntervalCV: Double,
+        playbackLeakageRejectThreshold: Double,
+        disturbanceRejectThreshold: Double,
+        snoreCandidateMinConfidence: Double,
+        snoreBoostWindowCount: Int,
+        interactionQuietThresholdMinutes: Double,
+        candidateWindowCount: Int,
+        confirmWindowCount: Int
+    ) {
+        self.motionStillnessThreshold = motionStillnessThreshold
+        self.audioQuietThreshold = audioQuietThreshold
+        self.audioVarianceThreshold = audioVarianceThreshold
+        self.frictionEventThreshold = frictionEventThreshold
+        self.breathingMinPeriodicityScore = breathingMinPeriodicityScore
+        self.breathingMaxIntervalCV = breathingMaxIntervalCV
+        self.playbackLeakageRejectThreshold = playbackLeakageRejectThreshold
+        self.disturbanceRejectThreshold = disturbanceRejectThreshold
+        self.snoreCandidateMinConfidence = snoreCandidateMinConfidence
+        self.snoreBoostWindowCount = snoreBoostWindowCount
+        self.interactionQuietThresholdMinutes = interactionQuietThresholdMinutes
+        self.candidateWindowCount = candidateWindowCount
+        self.confirmWindowCount = confirmWindowCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            motionStillnessThreshold: try container.decodeIfPresent(Double.self, forKey: .motionStillnessThreshold) ?? Self.default.motionStillnessThreshold,
+            audioQuietThreshold: try container.decodeIfPresent(Double.self, forKey: .audioQuietThreshold) ?? Self.default.audioQuietThreshold,
+            audioVarianceThreshold: try container.decodeIfPresent(Double.self, forKey: .audioVarianceThreshold) ?? Self.default.audioVarianceThreshold,
+            frictionEventThreshold: try container.decodeIfPresent(Int.self, forKey: .frictionEventThreshold) ?? Self.default.frictionEventThreshold,
+            breathingMinPeriodicityScore: try container.decodeIfPresent(Double.self, forKey: .breathingMinPeriodicityScore) ?? Self.default.breathingMinPeriodicityScore,
+            breathingMaxIntervalCV: try container.decodeIfPresent(Double.self, forKey: .breathingMaxIntervalCV) ?? Self.default.breathingMaxIntervalCV,
+            playbackLeakageRejectThreshold: try container.decodeIfPresent(Double.self, forKey: .playbackLeakageRejectThreshold) ?? Self.default.playbackLeakageRejectThreshold,
+            disturbanceRejectThreshold: try container.decodeIfPresent(Double.self, forKey: .disturbanceRejectThreshold) ?? Self.default.disturbanceRejectThreshold,
+            snoreCandidateMinConfidence: try container.decodeIfPresent(Double.self, forKey: .snoreCandidateMinConfidence) ?? Self.default.snoreCandidateMinConfidence,
+            snoreBoostWindowCount: try container.decodeIfPresent(Int.self, forKey: .snoreBoostWindowCount) ?? Self.default.snoreBoostWindowCount,
+            interactionQuietThresholdMinutes: try container.decodeIfPresent(Double.self, forKey: .interactionQuietThresholdMinutes) ?? Self.default.interactionQuietThresholdMinutes,
+            candidateWindowCount: try container.decodeIfPresent(Int.self, forKey: .candidateWindowCount) ?? Self.default.candidateWindowCount,
+            confirmWindowCount: try container.decodeIfPresent(Int.self, forKey: .confirmWindowCount) ?? Self.default.confirmWindowCount
+        )
+    }
 }
 
 struct RouteEParameters: Codable, Equatable, Sendable {
@@ -168,6 +245,32 @@ struct RouteEParameters: Codable, Equatable, Sendable {
     )
 }
 
+struct RouteFParameters: Codable, Equatable, Sendable {
+    var historyLookbackDays: Int
+    var hrTrendWindowMinutes: Double
+    var hrTrendMinSamples: Int
+    var candidateMinQualifiedSamples: Int
+    var confirmMinQualifiedSamples: Int
+    var hrvSupportWindowMinutes: Double
+    var staleSampleThresholdMinutes: Double
+    var reboundThresholdBPM: Double
+    var weakProfileExtraConfirmSamples: Int
+    var noLiveDataTimeoutMinutes: Double
+
+    static let `default` = RouteFParameters(
+        historyLookbackDays: 14,
+        hrTrendWindowMinutes: 20,
+        hrTrendMinSamples: 3,
+        candidateMinQualifiedSamples: 2,
+        confirmMinQualifiedSamples: 3,
+        hrvSupportWindowMinutes: 60,
+        staleSampleThresholdMinutes: 15,
+        reboundThresholdBPM: 5,
+        weakProfileExtraConfirmSamples: 1,
+        noLiveDataTimeoutMinutes: 90
+    )
+}
+
 struct ExperimentSettings: Codable, Equatable, Sendable {
     var targetBedtime: ClockTime
     var estimatedLatency: LatencyBucket
@@ -179,6 +282,7 @@ struct ExperimentSettings: Codable, Equatable, Sendable {
     var routeCParameters: RouteCParameters
     var routeDParameters: RouteDParameters
     var routeEParameters: RouteEParameters
+    var routeFParameters: RouteFParameters
     var disableHealthKitPriors: Bool
     var disableMicrophoneFeatures: Bool
 
@@ -193,6 +297,7 @@ struct ExperimentSettings: Codable, Equatable, Sendable {
         routeCParameters: .default,
         routeDParameters: .default,
         routeEParameters: .default,
+        routeFParameters: .default,
         disableHealthKitPriors: false,
         disableMicrophoneFeatures: false
     )
@@ -201,11 +306,14 @@ struct ExperimentSettings: Codable, Equatable, Sendable {
 protocol SettingsStore: Sendable {
     func load() async -> ExperimentSettings
     func save(_ settings: ExperimentSettings) async
+    func loadWatchSetupCompleted() async -> Bool
+    func saveWatchSetupCompleted(_ completed: Bool) async
 }
 
 actor UserDefaultsSettingsStore: SettingsStore {
     private let defaults: UserDefaults
     private let key = "sleep-detection-poc.settings"
+    private let watchSetupCompletedKey = "sleep-detection-poc.watch-setup-completed"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -225,6 +333,14 @@ actor UserDefaultsSettingsStore: SettingsStore {
     func save(_ settings: ExperimentSettings) async {
         guard let data = try? JSONEncoder.pretty.encode(settings) else { return }
         defaults.set(data, forKey: key)
+    }
+
+    func loadWatchSetupCompleted() async -> Bool {
+        defaults.bool(forKey: watchSetupCompletedKey)
+    }
+
+    func saveWatchSetupCompleted(_ completed: Bool) async {
+        defaults.set(completed, forKey: watchSetupCompletedKey)
     }
 }
 

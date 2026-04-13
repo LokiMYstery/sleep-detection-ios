@@ -155,12 +155,121 @@ struct SettingsView: View {
                     in: 0.005...0.08,
                     step: 0.0025
                 )
+
+                LabeledContent(
+                    "Audio variance",
+                    value: "\(String(format: "%.4f", model.settings.routeDParameters.audioVarianceThreshold))"
+                )
+                Slider(
+                    value: $model.settings.routeDParameters.audioVarianceThreshold,
+                    in: 0.00005...0.002,
+                    step: 0.00005
+                )
+
+                Stepper(
+                    "Friction threshold: \(model.settings.routeDParameters.frictionEventThreshold)",
+                    value: $model.settings.routeDParameters.frictionEventThreshold,
+                    in: 0...8
+                )
+
+                LabeledContent(
+                    "Breathing periodicity",
+                    value: model.settings.routeDParameters.breathingMinPeriodicityScore.formatted2
+                )
+                Slider(
+                    value: $model.settings.routeDParameters.breathingMinPeriodicityScore,
+                    in: 0.20...0.90,
+                    step: 0.01
+                )
+
+                LabeledContent(
+                    "Breathing interval CV",
+                    value: model.settings.routeDParameters.breathingMaxIntervalCV.formatted2
+                )
+                Slider(
+                    value: $model.settings.routeDParameters.breathingMaxIntervalCV,
+                    in: 0.10...0.80,
+                    step: 0.01
+                )
+
+                LabeledContent(
+                    "Playback leakage reject",
+                    value: model.settings.routeDParameters.playbackLeakageRejectThreshold.formatted2
+                )
+                Slider(
+                    value: $model.settings.routeDParameters.playbackLeakageRejectThreshold,
+                    in: 0.20...0.95,
+                    step: 0.01
+                )
+
+                LabeledContent(
+                    "Disturbance reject",
+                    value: model.settings.routeDParameters.disturbanceRejectThreshold.formatted2
+                )
+                Slider(
+                    value: $model.settings.routeDParameters.disturbanceRejectThreshold,
+                    in: 0.20...0.95,
+                    step: 0.01
+                )
+
+                LabeledContent(
+                    "Snore min confidence",
+                    value: model.settings.routeDParameters.snoreCandidateMinConfidence.formatted2
+                )
+                Slider(
+                    value: $model.settings.routeDParameters.snoreCandidateMinConfidence,
+                    in: 0.20...0.95,
+                    step: 0.01
+                )
+
+                Stepper(
+                    "Snore boost windows: \(model.settings.routeDParameters.snoreBoostWindowCount)",
+                    value: $model.settings.routeDParameters.snoreBoostWindowCount,
+                    in: 0...4
+                )
+            }
+
+            Section("Route F Parameters") {
+                Stepper(
+                    "Candidate samples: \(model.settings.routeFParameters.candidateMinQualifiedSamples)",
+                    value: $model.settings.routeFParameters.candidateMinQualifiedSamples,
+                    in: 1...6
+                )
+
+                Stepper(
+                    "Confirm samples: \(model.settings.routeFParameters.confirmMinQualifiedSamples)",
+                    value: $model.settings.routeFParameters.confirmMinQualifiedSamples,
+                    in: 2...8
+                )
+
+                LabeledContent(
+                    "HR trend window",
+                    value: "\(Int(model.settings.routeFParameters.hrTrendWindowMinutes)) min"
+                )
+                Slider(
+                    value: $model.settings.routeFParameters.hrTrendWindowMinutes,
+                    in: 10...40,
+                    step: 5
+                )
+
+                LabeledContent(
+                    "Stale threshold",
+                    value: "\(Int(model.settings.routeFParameters.staleSampleThresholdMinutes)) min"
+                )
+                Slider(
+                    value: $model.settings.routeFParameters.staleSampleThresholdMinutes,
+                    in: 5...30,
+                    step: 1
+                )
             }
 
             Section("Prior Snapshot") {
                 LabeledContent("Prior level", value: model.priorSnapshot.level.rawValue)
                 LabeledContent("Sleep samples", value: "\(model.priorSnapshot.sleepSampleCount)")
                 LabeledContent("Heart-rate days", value: "\(model.priorSnapshot.heartRateDayCount)")
+                LabeledContent("HRV days", value: "\(model.priorSnapshot.hrvDayCount)")
+                LabeledContent("Route F readiness", value: model.priorSnapshot.routeFReadiness.rawValue)
+                LabeledContent("Route F profile", value: model.priorSnapshot.routePriors.routeFProfile?.rawValue ?? "unknown")
             }
 
             Section("Permissions") {

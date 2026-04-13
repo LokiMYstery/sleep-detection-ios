@@ -12,8 +12,14 @@ targets:
     type: application
     platform: iOS
     deploymentTarget: "17.0"
+    attributes:
+      SystemCapabilities:
+        com.apple.BackgroundModes:
+          enabled: 1
     sources:
       - path: SleepDetectionPOC
+    dependencies:
+      - target: SleepDetectionWatchApp
     settings:
       base:
         PRODUCT_NAME: SleepDetectionPOC
@@ -27,6 +33,8 @@ targets:
         INFOPLIST_KEY_NSHealthShareUsageDescription: SleepDetectionPOC reads your sleep and heart-rate history to evaluate sleep-onset predictions.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: SleepDetectionPOC may analyze local audio features for later POC phases without saving raw audio.
         INFOPLIST_KEY_NSMotionUsageDescription: SleepDetectionPOC reads motion signals during a recording session to estimate sleep onset.
+        INFOPLIST_KEY_UIBackgroundModes:
+          - audio
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_ENTITLEMENTS: SleepDetectionPOC/Resources/SleepDetectionPOC.entitlements
     scheme:

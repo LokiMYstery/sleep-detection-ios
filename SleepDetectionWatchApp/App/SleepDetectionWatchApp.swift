@@ -1,3 +1,4 @@
+import HealthKit
 import SwiftUI
 import WatchKit
 
@@ -21,6 +22,12 @@ final class WatchExtensionDelegate: NSObject, WKApplicationDelegate {
     func applicationDidFinishLaunching() {
         Task { @MainActor in
             WatchRuntimeController.shared.activateIfNeeded()
+        }
+    }
+
+    func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
+        Task { @MainActor in
+            WatchRuntimeController.shared.handle(workoutConfiguration: workoutConfiguration)
         }
     }
 
@@ -53,6 +60,19 @@ private struct WatchHomeView: View {
                 Text(model.lastWindowSummary ?? "No payload has been emitted yet.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Logs") {
+                if model.recentLogs.isEmpty {
+                    Text("No local diagnostics yet.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.recentLogs.prefix(10), id: \.self) { line in
+                        Text(line)
+                            .font(.caption2)
+                    }
+                }
             }
         }
         .navigationTitle("Watch Route E")
