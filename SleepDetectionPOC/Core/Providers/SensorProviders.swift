@@ -155,7 +155,7 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             sessionStartTime: session.startTime,
             requestedAt: Date(),
             sessionDuration: 12 * 60 * 60,
-            preferredWindowDuration: 2 * 60
+            preferredWindowDuration: 60
         )
 
         protectedState.withLock { state in
