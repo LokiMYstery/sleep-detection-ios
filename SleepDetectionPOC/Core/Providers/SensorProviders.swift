@@ -35,6 +35,7 @@ protocol AudioProvider: SensorProvider {
     func consumeWindow(windowDuration: TimeInterval) -> AudioFeatures?
     func runtimeSnapshot() -> AudioRuntimeSnapshot
     func ensureRunning(reason: String)
+    func setBundledPlaybackEnabled(_ enabled: Bool)
 }
 
 protocol WatchProvider: SensorProvider {
@@ -80,6 +81,7 @@ final class PlaceholderAudioProvider: AudioProvider, @unchecked Sendable {
     func consumeWindow(windowDuration: TimeInterval) -> AudioFeatures? { nil }
     func runtimeSnapshot() -> AudioRuntimeSnapshot { .inactive }
     func ensureRunning(reason: String) {}
+    func setBundledPlaybackEnabled(_ enabled: Bool) {}
 }
 
 final class PlaceholderWatchProvider: WatchProvider, @unchecked Sendable {
@@ -1337,6 +1339,245 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         var prefersEchoCancelledInput: Bool { true }
     }
 
+    private final class BundledPlaybackController: @unchecked Sendable {
+        struct Snapshot: Sendable {
+            var available: Bool
+            var enabled: Bool
+            var assetName: String?
+            var error: String?
+        }
+
+        private let lock = NSLock()
+        private let resourceName: String
+        private let fileExtension: String
+        private let assetName: String
+        private var loadedSampleRate: Double?
+        private var samples: [Float] = []
+        private var nextSampleIndex = 0
+        private var isEnabled = false
+        private var lastError: String?
+
+        init(resourceName: String, fileExtension: String) {
+            self.resourceName = resourceName
+            self.fileExtension = fileExtension
+            self.assetName = "\(resourceName).\(fileExtension)"
+        }
+
+        private func withLock<R>(_ operation: () -> R) -> R {
+            lock.lock()
+            defer { lock.unlock() }
+            return operation()
+        }
+
+        func prepareIfNeeded(outputFormat: AVAudioFormat) {
+            let targetSampleRate = outputFormat.sampleRate
+            let shouldLoad = withLock { () -> Bool in
+                if !samples.isEmpty, loadedSampleRate == targetSampleRate {
+                    return false
+                }
+                return true
+            }
+            guard shouldLoad else { return }
+
+            do {
+                let decodedSamples = try Self.decodeLoopableSamples(
+                    resourceName: resourceName,
+                    fileExtension: fileExtension,
+                    outputFormat: outputFormat
+                )
+                withLock {
+                    samples = decodedSamples
+                    loadedSampleRate = targetSampleRate
+                    nextSampleIndex = 0
+                    lastError = nil
+                    if decodedSamples.isEmpty {
+                        isEnabled = false
+                    }
+                }
+            } catch {
+                withLock {
+                    samples = []
+                    loadedSampleRate = nil
+                    nextSampleIndex = 0
+                    isEnabled = false
+                    lastError = error.localizedDescription
+                }
+            }
+        }
+
+        func setEnabled(_ enabled: Bool) {
+            withLock {
+                if enabled, !samples.isEmpty {
+                    isEnabled = true
+                } else {
+                    isEnabled = false
+                    nextSampleIndex = 0
+                }
+            }
+        }
+
+        func stop() {
+            setEnabled(false)
+        }
+
+        func fillOutput(_ buffer: UnsafeMutablePointer<Float>, frameCount: Int) {
+            guard frameCount > 0 else { return }
+
+            lock.lock()
+            let shouldPlay = isEnabled && !samples.isEmpty
+            if !shouldPlay {
+                lock.unlock()
+                memset(buffer, 0, frameCount * MemoryLayout<Float>.size)
+                return
+            }
+
+            let sampleCount = samples.count
+            samples.withUnsafeBufferPointer { sampleBuffer in
+                guard let sourceBaseAddress = sampleBuffer.baseAddress else { return }
+                var remaining = frameCount
+                var writePointer = buffer
+
+                while remaining > 0 {
+                    if nextSampleIndex >= sampleCount {
+                        nextSampleIndex = 0
+                    }
+                    let copyCount = min(remaining, sampleCount - nextSampleIndex)
+                    memcpy(
+                        writePointer,
+                        sourceBaseAddress.advanced(by: nextSampleIndex),
+                        copyCount * MemoryLayout<Float>.size
+                    )
+                    writePointer = writePointer.advanced(by: copyCount)
+                    remaining -= copyCount
+                    nextSampleIndex += copyCount
+                }
+            }
+            lock.unlock()
+        }
+
+        func snapshot() -> Snapshot {
+            withLock {
+                Snapshot(
+                    available: !samples.isEmpty,
+                    enabled: isEnabled && !samples.isEmpty,
+                    assetName: assetName,
+                    error: lastError
+                )
+            }
+        }
+
+        private static func decodeLoopableSamples(
+            resourceName: String,
+            fileExtension: String,
+            outputFormat: AVAudioFormat
+        ) throws -> [Float] {
+            guard let resourceURL = Bundle.main.url(forResource: resourceName, withExtension: fileExtension) else {
+                throw CocoaError(.fileNoSuchFile, userInfo: [
+                    NSLocalizedDescriptionKey: "Bundled playback asset \(resourceName).\(fileExtension) was not found in the app bundle"
+                ])
+            }
+
+            let sourceFile = try AVAudioFile(forReading: resourceURL)
+            let sourceFormat = sourceFile.processingFormat
+            guard let targetFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: outputFormat.sampleRate,
+                channels: 1,
+                interleaved: false
+            ) else {
+                throw CocoaError(.coderInvalidValue, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to construct target playback format"
+                ])
+            }
+
+            let sourceFrameCapacity = AVAudioFrameCount(min(sourceFile.length, Int64(UInt32.max)))
+            guard sourceFrameCapacity > 0 else {
+                throw CocoaError(.fileReadCorruptFile, userInfo: [
+                    NSLocalizedDescriptionKey: "Bundled playback asset \(resourceName).\(fileExtension) is empty"
+                ])
+            }
+
+            guard let sourceBuffer = AVAudioPCMBuffer(
+                pcmFormat: sourceFormat,
+                frameCapacity: sourceFrameCapacity
+            ) else {
+                throw CocoaError(.coderInvalidValue, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to allocate source buffer for bundled playback asset"
+                ])
+            }
+            try sourceFile.read(into: sourceBuffer)
+
+            if
+                sourceFormat.channelCount == targetFormat.channelCount,
+                sourceFormat.sampleRate == targetFormat.sampleRate,
+                sourceFormat.commonFormat == .pcmFormatFloat32,
+                !sourceFormat.isInterleaved,
+                let channelData = sourceBuffer.floatChannelData?.pointee
+            {
+                let frameLength = Int(sourceBuffer.frameLength)
+                guard frameLength > 0 else {
+                    throw CocoaError(.fileReadCorruptFile, userInfo: [
+                        NSLocalizedDescriptionKey: "Bundled playback asset \(resourceName).\(fileExtension) decoded to zero frames"
+                    ])
+                }
+                return Array(UnsafeBufferPointer(start: channelData, count: frameLength))
+            }
+
+            guard let converter = AVAudioConverter(from: sourceFormat, to: targetFormat) else {
+                throw CocoaError(.coderInvalidValue, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to create audio converter for bundled playback asset"
+                ])
+            }
+
+            let capacityRatio = targetFormat.sampleRate / max(sourceFormat.sampleRate, 1)
+            let targetFrameCapacity = AVAudioFrameCount(
+                ceil(Double(sourceBuffer.frameLength) * capacityRatio)
+            ) + 1024
+            guard let convertedBuffer = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: max(targetFrameCapacity, 2048)
+            ) else {
+                throw CocoaError(.coderInvalidValue, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to allocate converted buffer for bundled playback asset"
+                ])
+            }
+
+            var didProvideInput = false
+            var conversionError: NSError?
+            let status = converter.convert(to: convertedBuffer, error: &conversionError) { _, outStatus in
+                if didProvideInput {
+                    outStatus.pointee = .endOfStream
+                    return nil
+                }
+                didProvideInput = true
+                outStatus.pointee = .haveData
+                return sourceBuffer
+            }
+
+            if let conversionError {
+                throw conversionError
+            }
+            guard status == .haveData || status == .endOfStream || status == .inputRanDry else {
+                throw CocoaError(.coderReadCorrupt, userInfo: [
+                    NSLocalizedDescriptionKey: "Bundled playback asset conversion returned \(status.rawValue)"
+                ])
+            }
+            guard
+                let convertedChannelData = convertedBuffer.floatChannelData?.pointee,
+                convertedBuffer.frameLength > 0
+            else {
+                throw CocoaError(.fileReadCorruptFile, userInfo: [
+                    NSLocalizedDescriptionKey: "Bundled playback asset \(resourceName).\(fileExtension) converted to zero frames"
+                ])
+            }
+
+            return Array(UnsafeBufferPointer(
+                start: convertedChannelData,
+                count: Int(convertedBuffer.frameLength)
+            ))
+        }
+    }
+
     private final class VoiceProcessingCaptureBackend: @unchecked Sendable {
         private static let inputBus: UInt32 = 1
         private static let outputBus: UInt32 = 0
@@ -1364,20 +1605,25 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
         private let captureFormat: AVAudioFormat
         private let bufferHandler: @Sendable (AVAudioPCMBuffer) -> Void
+        private let playbackRenderer: @Sendable (UnsafeMutablePointer<Float>, Int) -> Void
         private let outputHandler: @Sendable () -> Void
         private let errorHandler: @Sendable (String) -> Void
         private var audioUnit: AudioUnit?
         private var scratchBuffer: UnsafeMutablePointer<Float>?
         private var scratchFrameCapacity: UInt32 = 0
+        private var outputScratchBuffer: UnsafeMutablePointer<Float>?
+        private var outputScratchFrameCapacity: UInt32 = 0
 
         init(
             captureFormat: AVAudioFormat,
             bufferHandler: @escaping @Sendable (AVAudioPCMBuffer) -> Void,
+            playbackRenderer: @escaping @Sendable (UnsafeMutablePointer<Float>, Int) -> Void,
             outputHandler: @escaping @Sendable () -> Void,
             errorHandler: @escaping @Sendable (String) -> Void
         ) {
             self.captureFormat = captureFormat
             self.bufferHandler = bufferHandler
+            self.playbackRenderer = playbackRenderer
             self.outputHandler = outputHandler
             self.errorHandler = errorHandler
         }
@@ -1524,6 +1770,9 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             scratchBuffer?.deallocate()
             scratchBuffer = nil
             scratchFrameCapacity = 0
+            outputScratchBuffer?.deallocate()
+            outputScratchBuffer = nil
+            outputScratchFrameCapacity = 0
         }
 
         private func handleInput(
@@ -1580,20 +1829,33 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             frameCount: UInt32,
             ioData: UnsafeMutablePointer<AudioBufferList>?
         ) -> OSStatus {
-            guard let ioData else { return noErr }
+            guard let ioData else {
+                outputHandler()
+                return noErr
+            }
             let bufferList = UnsafeMutableAudioBufferListPointer(ioData)
             guard !bufferList.isEmpty else {
                 outputHandler()
                 return noErr
             }
 
+            ensureOutputScratchCapacity(frameCount)
+            guard let outputScratchBuffer else {
+                outputHandler()
+                return noErr
+            }
+
+            let outputFrameCount = Int(frameCount)
+            playbackRenderer(outputScratchBuffer, outputFrameCount)
+
             for audioBuffer in bufferList {
                 guard let data = audioBuffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
-                let sampleCount = max(
-                    Int(audioBuffer.mDataByteSize) / MemoryLayout<Float>.size,
-                    Int(frameCount * audioBuffer.mNumberChannels)
+                copyRenderedOutput(
+                    outputScratchBuffer,
+                    frameCount: outputFrameCount,
+                    into: data,
+                    channelCount: Int(max(audioBuffer.mNumberChannels, 1))
                 )
-                fillSilence(data, sampleCount: sampleCount)
             }
 
             outputHandler()
@@ -1605,6 +1867,36 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             scratchBuffer?.deallocate()
             scratchBuffer = UnsafeMutablePointer<Float>.allocate(capacity: Int(frameCount))
             scratchFrameCapacity = frameCount
+        }
+
+        private func ensureOutputScratchCapacity(_ frameCount: UInt32) {
+            guard frameCount > outputScratchFrameCapacity else { return }
+            outputScratchBuffer?.deallocate()
+            outputScratchBuffer = UnsafeMutablePointer<Float>.allocate(capacity: Int(frameCount))
+            outputScratchFrameCapacity = frameCount
+        }
+
+        private func copyRenderedOutput(
+            _ source: UnsafeMutablePointer<Float>,
+            frameCount: Int,
+            into destination: UnsafeMutablePointer<Float>,
+            channelCount: Int
+        ) {
+            guard frameCount > 0, channelCount > 0 else { return }
+
+            if channelCount == 1 {
+                memcpy(destination, source, frameCount * MemoryLayout<Float>.size)
+                return
+            }
+
+            var outputIndex = 0
+            for frameIndex in 0..<frameCount {
+                let sample = source[frameIndex]
+                for _ in 0..<channelCount {
+                    destination[outputIndex] = sample
+                    outputIndex += 1
+                }
+            }
         }
 
         private func fillSilence(_ buffer: UnsafeMutablePointer<Float>, sampleCount: Int) {
@@ -1685,6 +1977,10 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         var aggregatedIOPreferenceEnabled = false
         var echoCancelledInputAvailable = false
         var echoCancelledInputEnabled = false
+        var bundledPlaybackAvailable = false
+        var bundledPlaybackEnabled = false
+        var bundledPlaybackAssetName: String?
+        var bundledPlaybackError: String?
         var lastObservedFrameGapSeconds = 0.0
         var lastFrameAt: Date?
         var lastNonEmptyWindowAt: Date?
@@ -1729,6 +2025,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
     private var captureBackend: VoiceProcessingCaptureBackend?
     private var captureWatchdogTimer: DispatchSourceTimer?
     private let sessionStrategy: AudioSessionStrategyKind
+    private let bundledPlaybackController: BundledPlaybackController
     private let samples: ThreadSafeArray<AudioFrame>
     private let runtimeState: ThreadSafeBox<RuntimeState>
     private let rawCaptureStorage: ThreadSafeBox<RawCaptureStorage>
@@ -1744,6 +2041,10 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         sessionStrategy: AudioSessionStrategyKind = .voiceChatFullDuplex
     ) {
         self.sessionStrategy = sessionStrategy
+        self.bundledPlaybackController = BundledPlaybackController(
+            resourceName: "0001ZM20251208_A",
+            fileExtension: "mp3"
+        )
         self.samples = ThreadSafeArray(maxSize: maxSamples)
         self.runtimeState = ThreadSafeBox(RuntimeState())
         self.rawCaptureStorage = ThreadSafeBox(RawCaptureStorage())
@@ -1769,6 +2070,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             try managementQueue.sync {
                 guard !runtimeState.read({ $0.wantsCapture }) else { return }
                 cleanupRawCaptureFiles()
+                bundledPlaybackController.stop()
                 let routeState = currentRouteState()
                 runtimeState.write { state in
                     state = RuntimeState()
@@ -1781,6 +2083,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                     state.lastKnownRoute = routeState.description
                     state.hasInputRoute = routeState.hasInputRoute
                 }
+                syncBundledPlaybackRuntimeLocked()
 
                 do {
                     try activateAudioSession(reason: "initialStart")
@@ -1809,6 +2112,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
     func stop() {
         managementQueue.sync {
+            bundledPlaybackController.stop()
             let routeState = currentRouteState()
             runtimeState.write { state in
                 state.wantsCapture = false
@@ -1826,6 +2130,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                 state.repairSuppressedReason = nil
                 state.lastRepairDecision = nil
             }
+            syncBundledPlaybackRuntimeLocked()
             stopCaptureWatchdogLocked()
             stopCaptureAndDeactivateSession(clearSamples: true)
             cleanupRawCaptureFiles()
@@ -1915,6 +2220,10 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             lastRepairDecision: state.lastRepairDecision,
             echoCancelledInputAvailable: state.echoCancelledInputAvailable,
             echoCancelledInputEnabled: state.echoCancelledInputEnabled,
+            bundledPlaybackAvailable: state.bundledPlaybackAvailable,
+            bundledPlaybackEnabled: state.bundledPlaybackEnabled,
+            bundledPlaybackAssetName: state.bundledPlaybackAssetName,
+            bundledPlaybackError: state.bundledPlaybackError,
             aggregatedIOPreferenceError: state.aggregatedIOPreferenceError,
             rawCaptureError: state.rawCaptureError,
             lastError: state.lastError
@@ -1928,6 +2237,16 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                 allowSessionActivation: true,
                 forceRebuildBackend: false
             )
+        }
+    }
+
+    func setBundledPlaybackEnabled(_ enabled: Bool) {
+        managementQueue.sync {
+            if enabled, runtimeState.read({ $0.wantsCapture }) {
+                prepareBundledPlaybackAssetLocked(outputFormat: makeCaptureFormat())
+            }
+            bundledPlaybackController.setEnabled(enabled)
+            syncBundledPlaybackRuntimeLocked()
         }
     }
 
@@ -2382,6 +2701,21 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         min(max(value, lower), upper)
     }
 
+    private func prepareBundledPlaybackAssetLocked(outputFormat: AVAudioFormat) {
+        bundledPlaybackController.prepareIfNeeded(outputFormat: outputFormat)
+        syncBundledPlaybackRuntimeLocked()
+    }
+
+    private func syncBundledPlaybackRuntimeLocked() {
+        let snapshot = bundledPlaybackController.snapshot()
+        runtimeState.write { state in
+            state.bundledPlaybackAvailable = snapshot.available
+            state.bundledPlaybackEnabled = snapshot.enabled
+            state.bundledPlaybackAssetName = snapshot.assetName
+            state.bundledPlaybackError = snapshot.error
+        }
+    }
+
     private func recordOutputRender() {
         let now = Date()
         runtimeState.write { state in
@@ -2711,12 +3045,16 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         }
 
         let format = makeCaptureFormat()
+        prepareBundledPlaybackAssetLocked(outputFormat: format)
         prepareRawCaptureSegment(format: format)
 
         let backend = VoiceProcessingCaptureBackend(
             captureFormat: format,
             bufferHandler: { [weak self] buffer in
                 self?.ingestCapturedBuffer(buffer)
+            },
+            playbackRenderer: { [weak self] buffer, frameCount in
+                self?.bundledPlaybackController.fillOutput(buffer, frameCount: frameCount)
             },
             outputHandler: { [weak self] in
                 self?.recordOutputRender()
@@ -2749,6 +3087,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                     state.restartCount += 1
                 }
             }
+            syncBundledPlaybackRuntimeLocked()
         } catch {
             captureBackend = nil
             runtimeState.write { state in
@@ -2757,6 +3096,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                 state.keepAliveOutputEnabled = false
                 state.lastError = error.localizedDescription
             }
+            syncBundledPlaybackRuntimeLocked()
             throw error
         }
     }
@@ -2770,6 +3110,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             state.keepAliveOutputEnabled = false
             state.lastRestartReason = reason
         }
+        syncBundledPlaybackRuntimeLocked()
     }
 
     private func stopCaptureAndDeactivateSession(clearSamples: Bool) {

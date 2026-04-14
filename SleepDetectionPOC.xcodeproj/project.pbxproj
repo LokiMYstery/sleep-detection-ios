@@ -26,9 +26,11 @@
 		B1066678D6FB03D166970780 /* SessionAnalytics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05E841F7C2AD04072EB9682D /* SessionAnalytics.swift */; };
 		B87AEDCC9A3D004DFEDB5A45 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0032DEE2BBB85F3A51C0F85E /* AppModel.swift */; };
 		BA8F8D929CEF3185A9075112 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D665EF611E226CBD0013DC /* Settings.swift */; };
+		C7E4B1F046D92EE7E3FAAC58 /* WatchAutoStopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E166ABA6885A88913CAB55E2 /* WatchAutoStopTests.swift */; };
 		CF5A4006F4C45E869D1630FA /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99FAB824F7DB2886E85246B6 /* Models.swift */; };
 		D4FCEA0AA596534D22DA820D /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 202B8C752C800E6957324305 /* HomeView.swift */; };
 		DC04CE7C0277241573BB9E6C /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65E12E4CF1151D1323BEE3FC /* HistoryView.swift */; };
+		E325C6D41AAFCFEEAF06574C /* 0001ZM20251208_A.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = D586A4C1117F46F57E87DD76 /* 0001ZM20251208_A.mp3 */; };
 		EBDE434DB36912E12A6A22E6 /* HealthKitServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0AE056A3CA51F045F22C110 /* HealthKitServices.swift */; };
 		EEE15A07F8BA851F8EABB01A /* FileSessionRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D32F56B2C7B1210600D9819 /* FileSessionRepository.swift */; };
 		FBA98447218F86C35EC02B7B /* PassivePhysiologyProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3D9FA5BB37371BEB605EFE8 /* PassivePhysiologyProvider.swift */; };
@@ -68,14 +70,14 @@
 /* Begin PBXFileReference section */
 		0032DEE2BBB85F3A51C0F85E /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		05E841F7C2AD04072EB9682D /* SessionAnalytics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAnalytics.swift; sourceTree = "<group>"; };
-		069243732F8CCB0E00FC20FA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
-		069243742F8CD1DC00FC20FA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		1443DB600E59BC49A420111A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		1D32F56B2C7B1210600D9819 /* FileSessionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSessionRepository.swift; sourceTree = "<group>"; };
 		202B8C752C800E6957324305 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		21C143B040E14D3F63097B93 /* SleepDetectionPOC.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SleepDetectionPOC.entitlements; sourceTree = "<group>"; };
+		3126826E9E4FF94480E99144 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		43C5556F275F024E5E0CDB83 /* Formatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Formatters.swift; sourceTree = "<group>"; };
 		4954FA40E6A36B8182C8E180 /* SleepDetectionPOCTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SleepDetectionPOCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SleepDetectionPOC.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D8E9D263EFFD62659ECBFF5 /* SleepDetectionPOC.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SleepDetectionPOC.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		531AF714B00D2AA2FCE146D8 /* ExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportView.swift; sourceTree = "<group>"; };
 		5C8DEC7DA84AB2A99A233836 /* SleepDetectionWatchApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SleepDetectionWatchApp.entitlements; sourceTree = "<group>"; };
 		5F65EA13E17C3547FAF2DAB8 /* SensorProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensorProviders.swift; sourceTree = "<group>"; };
@@ -92,7 +94,9 @@
 		A3DEAD38B98A8A9EB4AEE2DC /* MonitorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorView.swift; sourceTree = "<group>"; };
 		B3D9FA5BB37371BEB605EFE8 /* PassivePhysiologyProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassivePhysiologyProvider.swift; sourceTree = "<group>"; };
 		B9B579DC61956E38916DC05E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		D586A4C1117F46F57E87DD76 /* 0001ZM20251208_A.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = 0001ZM20251208_A.mp3; sourceTree = "<group>"; };
 		DA46FCFDF2B98A0E0BB029A4 /* ConcurrencyUtils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConcurrencyUtils.swift; sourceTree = "<group>"; };
+		E166ABA6885A88913CAB55E2 /* WatchAutoStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAutoStopTests.swift; sourceTree = "<group>"; };
 		F0AE056A3CA51F045F22C110 /* HealthKitServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitServices.swift; sourceTree = "<group>"; };
 		F0E3C7D7CBCE5C06A824F626 /* SleepDetectionPOCApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepDetectionPOCApp.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -168,7 +172,7 @@
 		60645454ED70DB6FB06290F9 /* SleepDetectionPOC */ = {
 			isa = PBXGroup;
 			children = (
-				069243732F8CCB0E00FC20FA /* Info.plist */,
+				3126826E9E4FF94480E99144 /* Info.plist */,
 				CB8EF52070D6424E82A0241E /* App */,
 				4714832DEB127A438304E3A9 /* Core */,
 				2E0047B5694E9D156F11882C /* Features */,
@@ -185,6 +189,14 @@
 			path = Export;
 			sourceTree = "<group>";
 		};
+		7139909C2759F48E312EE5F6 /* assets */ = {
+			isa = PBXGroup;
+			children = (
+				D586A4C1117F46F57E87DD76 /* 0001ZM20251208_A.mp3 */,
+			);
+			path = assets;
+			sourceTree = "<group>";
+		};
 		8681057E19BDBE2F644DBE5C /* Domain */ = {
 			isa = PBXGroup;
 			children = (
@@ -197,7 +209,7 @@
 		AFDE95A3E0EEC996D8A0A5EF /* SleepDetectionWatchApp */ = {
 			isa = PBXGroup;
 			children = (
-				069243742F8CD1DC00FC20FA /* Info.plist */,
+				1443DB600E59BC49A420111A /* Info.plist */,
 				31DF78CE8BB94343A7A23EAD /* App */,
 				FC0C86968A1ABD15568A76B5 /* Core */,
 				3D58D34175C1D94D5304B946 /* Resources */,
@@ -209,6 +221,7 @@
 			isa = PBXGroup;
 			children = (
 				9EBE18D14DE886B9AA83F6E6 /* SleepDetectionPOCTests.swift */,
+				E166ABA6885A88913CAB55E2 /* WatchAutoStopTests.swift */,
 			);
 			path = SleepDetectionPOCTests;
 			sourceTree = "<group>";
@@ -294,6 +307,7 @@
 		FB9934B93C8AC580EB6519B7 = {
 			isa = PBXGroup;
 			children = (
+				7139909C2759F48E312EE5F6 /* assets */,
 				60645454ED70DB6FB06290F9 /* SleepDetectionPOC */,
 				B93ECCB4BED4C8A36A66A7B2 /* SleepDetectionPOCTests */,
 				AFDE95A3E0EEC996D8A0A5EF /* SleepDetectionWatchApp */,
@@ -317,6 +331,7 @@
 			buildConfigurationList = 5F0EADF320FAAC44DFB6D4D6 /* Build configuration list for PBXNativeTarget "SleepDetectionPOC" */;
 			buildPhases = (
 				35FA2A988A523F8B5BCC088E /* Sources */,
+				E6CDF37A3FE1AB42F22FF471 /* Resources */,
 				2E36DDDE764052C30FF5D6A9 /* Embed Watch Content */,
 			);
 			buildRules = (
@@ -377,11 +392,7 @@
 				TargetAttributes = {
 					1D91BBBCDC789F7F34156E8F = {
 						DevelopmentTeam = BYRP6L2B45;
-						SystemCapabilities = {
-							com.apple.BackgroundModes = {
-								enabled = 1;
-							};
-						};
+						SystemCapabilities = "[\"com.apple.BackgroundModes\": [\"enabled\": 1]]";
 					};
 					E35B80ABEB8347899F6F3DA3 = {
 						DevelopmentTeam = BYRP6L2B45;
@@ -410,6 +421,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E6CDF37A3FE1AB42F22FF471 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E325C6D41AAFCFEEAF06574C /* 0001ZM20251208_A.mp3 in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		35FA2A988A523F8B5BCC088E /* Sources */ = {
@@ -443,6 +465,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0F0902E81070846BBCC6DE26 /* SleepDetectionPOCTests.swift in Sources */,
+				C7E4B1F046D92EE7E3FAAC58 /* WatchAutoStopTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -527,7 +550,9 @@
 				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetectionPOC reads motion signals during a recording session to estimate sleep onset.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					audio,
+				);
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -613,7 +638,9 @@
 				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetectionPOC reads motion signals during a recording session to estimate sleep onset.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UIBackgroundModes = audio;
+				INFOPLIST_KEY_UIBackgroundModes = (
+					audio,
+				);
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -639,7 +666,9 @@
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetection watch reads heart-rate samples to evaluate sleep onset.";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "SleepDetection watch starts a workout session so heart-rate collection can stay active during sleep monitoring.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetection watch records wrist motion to estimate sleep onset.";
-				INFOPLIST_KEY_WKBackgroundModes = "workout-processing";
+				INFOPLIST_KEY_WKBackgroundModes = (
+					"workout-processing",
+				);
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.rickluo.SleepDetectionPOC;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOC.watchkitapp;
 				PRODUCT_MODULE_NAME = SleepDetectionWatchApp;
@@ -662,7 +691,9 @@
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "SleepDetection watch reads heart-rate samples to evaluate sleep onset.";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "SleepDetection watch starts a workout session so heart-rate collection can stay active during sleep monitoring.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "SleepDetection watch records wrist motion to estimate sleep onset.";
-				INFOPLIST_KEY_WKBackgroundModes = "workout-processing";
+				INFOPLIST_KEY_WKBackgroundModes = (
+					"workout-processing",
+				);
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.rickluo.SleepDetectionPOC;
 				PRODUCT_BUNDLE_IDENTIFIER = com.rickluo.SleepDetectionPOC.watchkitapp;
 				PRODUCT_MODULE_NAME = SleepDetectionWatchApp;

@@ -253,6 +253,10 @@ struct AudioRuntimeSnapshot: Codable, Equatable, Sendable {
     var lastRepairDecision: String?
     var echoCancelledInputAvailable: Bool
     var echoCancelledInputEnabled: Bool
+    var bundledPlaybackAvailable: Bool
+    var bundledPlaybackEnabled: Bool
+    var bundledPlaybackAssetName: String?
+    var bundledPlaybackError: String?
     var aggregatedIOPreferenceError: String?
     var rawCaptureError: String?
     var lastError: String?
@@ -313,6 +317,10 @@ struct AudioRuntimeSnapshot: Codable, Equatable, Sendable {
         lastRepairDecision: nil,
         echoCancelledInputAvailable: false,
         echoCancelledInputEnabled: false,
+        bundledPlaybackAvailable: false,
+        bundledPlaybackEnabled: false,
+        bundledPlaybackAssetName: nil,
+        bundledPlaybackError: nil,
         aggregatedIOPreferenceError: nil,
         rawCaptureError: nil,
         lastError: nil
@@ -374,6 +382,10 @@ struct AudioRuntimeSnapshot: Codable, Equatable, Sendable {
         lastRepairDecision: String?,
         echoCancelledInputAvailable: Bool,
         echoCancelledInputEnabled: Bool,
+        bundledPlaybackAvailable: Bool,
+        bundledPlaybackEnabled: Bool,
+        bundledPlaybackAssetName: String?,
+        bundledPlaybackError: String?,
         aggregatedIOPreferenceError: String?,
         rawCaptureError: String?,
         lastError: String?
@@ -433,6 +445,10 @@ struct AudioRuntimeSnapshot: Codable, Equatable, Sendable {
         self.lastRepairDecision = lastRepairDecision
         self.echoCancelledInputAvailable = echoCancelledInputAvailable
         self.echoCancelledInputEnabled = echoCancelledInputEnabled
+        self.bundledPlaybackAvailable = bundledPlaybackAvailable
+        self.bundledPlaybackEnabled = bundledPlaybackEnabled
+        self.bundledPlaybackAssetName = bundledPlaybackAssetName
+        self.bundledPlaybackError = bundledPlaybackError
         self.aggregatedIOPreferenceError = aggregatedIOPreferenceError
         self.rawCaptureError = rawCaptureError
         self.lastError = lastError
@@ -515,6 +531,10 @@ struct AudioRuntimeSnapshot: Codable, Equatable, Sendable {
             lastRepairDecision: eventPayload["lastRepairDecision"].flatMap { $0.isEmpty ? nil : $0 },
             echoCancelledInputAvailable: Bool(eventPayload["echoCancelledInputAvailable"] ?? "") ?? false,
             echoCancelledInputEnabled: Bool(eventPayload["echoCancelledInputEnabled"] ?? "") ?? false,
+            bundledPlaybackAvailable: Bool(eventPayload["bundledPlaybackAvailable"] ?? "") ?? false,
+            bundledPlaybackEnabled: Bool(eventPayload["bundledPlaybackEnabled"] ?? "") ?? false,
+            bundledPlaybackAssetName: eventPayload["bundledPlaybackAssetName"].flatMap { $0.isEmpty ? nil : $0 },
+            bundledPlaybackError: eventPayload["bundledPlaybackError"].flatMap { $0.isEmpty ? nil : $0 },
             aggregatedIOPreferenceError: eventPayload["aggregatedIOPreferenceError"].flatMap { $0.isEmpty ? nil : $0 },
             rawCaptureError: eventPayload["rawCaptureError"].flatMap { $0.isEmpty ? nil : $0 },
             lastError: eventPayload["lastError"].flatMap { $0.isEmpty ? nil : $0 }
@@ -578,6 +598,10 @@ struct AudioRuntimeSnapshot: Codable, Equatable, Sendable {
             "lastRepairDecision": lastRepairDecision ?? "",
             "echoCancelledInputAvailable": String(echoCancelledInputAvailable),
             "echoCancelledInputEnabled": String(echoCancelledInputEnabled),
+            "bundledPlaybackAvailable": String(bundledPlaybackAvailable),
+            "bundledPlaybackEnabled": String(bundledPlaybackEnabled),
+            "bundledPlaybackAssetName": bundledPlaybackAssetName ?? "",
+            "bundledPlaybackError": bundledPlaybackError ?? "",
             "aggregatedIOPreferenceError": aggregatedIOPreferenceError ?? "",
             "rawCaptureError": rawCaptureError ?? "",
             "lastError": lastError ?? ""

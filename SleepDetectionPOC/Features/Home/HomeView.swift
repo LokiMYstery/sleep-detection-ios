@@ -16,6 +16,32 @@ struct HomeView: View {
                     LabeledContent("Status", value: session.status.rawValue)
                     LabeledContent("Started", value: session.startTime.formattedDateTime)
                     LabeledContent("Prior Level", value: session.priorLevel.rawValue)
+                    LabeledContent(
+                        "Loop Music",
+                        value: model.audioRuntimeSnapshot.bundledPlaybackEnabled
+                            ? "Playing"
+                            : (model.audioRuntimeSnapshot.bundledPlaybackAvailable ? "Ready" : "Unavailable")
+                    )
+                    if let assetName = model.audioRuntimeSnapshot.bundledPlaybackAssetName {
+                        Text(assetName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(
+                        model.audioRuntimeSnapshot.bundledPlaybackEnabled
+                            ? "Stop Music Loop"
+                            : "Play Music Loop"
+                    ) {
+                        Task {
+                            await model.setBundledPlaybackEnabled(!model.audioRuntimeSnapshot.bundledPlaybackEnabled)
+                        }
+                    }
+                    .disabled(!model.audioRuntimeSnapshot.bundledPlaybackAvailable)
+                    if let playbackError = model.audioRuntimeSnapshot.bundledPlaybackError {
+                        Text(playbackError)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Picker(
                         "Phone placement",
                         selection: Binding(
@@ -94,6 +120,9 @@ struct HomeView: View {
                 LabeledContent("Repair Suppressed", value: model.audioRuntimeSnapshot.repairSuppressedReason ?? "None")
                 LabeledContent("Echo Cancel Available", value: model.audioRuntimeSnapshot.echoCancelledInputAvailable ? "Yes" : "No")
                 LabeledContent("Echo Cancel Enabled", value: model.audioRuntimeSnapshot.echoCancelledInputEnabled ? "Yes" : "No")
+                LabeledContent("Bundled Playback", value: model.audioRuntimeSnapshot.bundledPlaybackEnabled ? "Playing" : (model.audioRuntimeSnapshot.bundledPlaybackAvailable ? "Ready" : "Unavailable"))
+                LabeledContent("Bundled Asset", value: model.audioRuntimeSnapshot.bundledPlaybackAssetName ?? "None")
+                LabeledContent("Bundled Playback Error", value: model.audioRuntimeSnapshot.bundledPlaybackError ?? "None")
                 LabeledContent("Aggregated IO", value: model.audioRuntimeSnapshot.aggregatedIOPreferenceEnabled ? "Enabled" : "Not Enabled")
                 LabeledContent("Aggregated IO Error", value: model.audioRuntimeSnapshot.aggregatedIOPreferenceError ?? "None")
                 LabeledContent("Raw Capture Segments", value: "\(model.audioRuntimeSnapshot.rawCaptureSegmentCount)")

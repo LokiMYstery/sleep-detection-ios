@@ -18,6 +18,8 @@ targets:
           enabled: 1
     sources:
       - path: SleepDetectionPOC
+      - path: assets/0001ZM20251208_A.mp3
+        buildPhase: resources
     dependencies:
       - target: SleepDetectionWatchApp
     settings:

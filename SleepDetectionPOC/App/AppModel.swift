@@ -604,6 +604,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setBundledPlaybackEnabled(_ enabled: Bool) async {
+        guard currentSession != nil else { return }
+        audioProvider.setBundledPlaybackEnabled(enabled)
+        updateAudioRuntimeState(recordEvents: true)
+
+        eventBus.post(
+            RouteEvent(
+                routeId: .D,
+                eventType: "custom.audioBundledPlaybackToggled",
+                payload: [
+                    "enabled": String(audioRuntimeSnapshot.bundledPlaybackEnabled),
+                    "available": String(audioRuntimeSnapshot.bundledPlaybackAvailable),
+                    "assetName": audioRuntimeSnapshot.bundledPlaybackAssetName ?? "",
+                    "error": audioRuntimeSnapshot.bundledPlaybackError ?? ""
+                ]
+            )
+        )
+    }
+
     func prepareWatch() async {
         await bootstrapIfNeeded()
         updateWatchRuntimeState(recordEvents: true)
