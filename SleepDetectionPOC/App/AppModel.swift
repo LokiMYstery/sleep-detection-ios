@@ -67,6 +67,7 @@ final class AppModel: ObservableObject {
     private var watchStartCommandIssuedAt: Date?
     private var watchAutoStopTask: Task<Void, Never>?
     private var didAutoStopWatchForCurrentSession = false
+    private var didRequestOrphanWatchCleanup = false
 
     /// App-level error type for UI display
     struct AppError: Identifiable, Equatable {
@@ -1131,6 +1132,7 @@ final class AppModel: ObservableObject {
 
         syncWatchStartupFlags(with: snapshot)
         syncWatchSetupCompletion(with: snapshot)
+        requestOrphanWatchCleanupIfNeeded(snapshot, recordEvents: recordEvents)
 
         if snapshot.runtimeState == .authorizationRequired {
             isPreparingWatch = true
@@ -1553,6 +1555,7 @@ final class AppModel: ObservableObject {
         hasIssuedWatchStartForCurrentSession = false
         lastIssuedWatchCommandKind = nil
         didEmitWatchCompanionMissing = false
+        didRequestOrphanWatchCleanup = false
     }
 
     private func resetWatchStartCommandTracking() {
@@ -1600,6 +1603,38 @@ final class AppModel: ObservableObject {
         if snapshot.lastWindowAt != nil {
             sawFirstWatchWindow = true
         }
+    }
+
+    private func requestOrphanWatchCleanupIfNeeded(_ snapshot: WatchRuntimeSnapshot, recordEvents: Bool) {
+        let runtimeAppearsActive =
+            snapshot.runtimeState == .workoutStarted ||
+            snapshot.runtimeState == .mirrorConnected ||
+            snapshot.runtimeState == .mirrorDisconnected
+
+        if currentSession != nil || isPreparingWatch || pendingWatchSessionStart || !runtimeAppearsActive {
+            if !runtimeAppearsActive || snapshot.runtimeState == .stopped {
+                didRequestOrphanWatchCleanup = false
+            }
+            return
+        }
+
+        guard !didRequestOrphanWatchCleanup else { return }
+        didRequestOrphanWatchCleanup = true
+        lastIssuedWatchCommandKind = .stopSession
+        watchProvider.stop()
+
+        guard recordEvents else { return }
+        eventBus.post(
+            RouteEvent(
+                routeId: .E,
+                eventType: "custom.watchOrphanCleanupRequested",
+                payload: [
+                    "runtimeState": snapshot.runtimeState.rawValue,
+                    "transportMode": snapshot.transportMode.rawValue,
+                    "lastError": snapshot.lastError ?? ""
+                ]
+            )
+        )
     }
 
     private func evaluateWatchStartupTimeouts(now: Date, snapshot: WatchRuntimeSnapshot) {

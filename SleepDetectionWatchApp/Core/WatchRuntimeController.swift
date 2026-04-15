@@ -53,6 +53,8 @@ final class WatchRuntimeController: NSObject, ObservableObject {
     private var heartRateSamples: [WatchWindowPayload.HRSample] = []
     private var queuedEnvelopes: [WatchTransportEnvelope] = []
     private var extractionTask: Task<Void, Never>?
+    private var deferredStartCommand: WatchSyncCommand?
+    private var isWaitingForWorkoutShutdown = false
     private var workoutSession: HKWorkoutSession?
     private var workoutBuilder: HKLiveWorkoutBuilder?
     private var currentRuntimeState: WatchRuntimeSnapshot.RuntimeState = .idle
@@ -450,6 +452,17 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         }
 
         log("startSession: received \(command.command.rawValue) for \(command.sessionId.uuidString)")
+        if workoutSession != nil {
+            deferredStartCommand = command
+            log("startSession: existing workout active; stopping current runtime before restart")
+            beginWorkoutShutdownForRestartIfNeeded(reason: "existingWorkoutActive")
+            return
+        }
+
+        beginStartSessionBootstrap(with: command)
+    }
+
+    private func beginStartSessionBootstrap(with command: WatchSyncCommand) {
         extractionTask?.cancel()
         extractionTask = nil
         if let query = heartRateQuery {
@@ -480,6 +493,38 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         }
 
         refreshConnectivity()
+    }
+
+    private func beginWorkoutShutdownForRestartIfNeeded(reason: String) {
+        guard workoutSession != nil else {
+            if let deferredStartCommand {
+                self.deferredStartCommand = nil
+                beginStartSessionBootstrap(with: deferredStartCommand)
+            }
+            return
+        }
+        guard !isWaitingForWorkoutShutdown else {
+            log("beginWorkoutShutdownForRestartIfNeeded: already waiting reason=\(reason)")
+            return
+        }
+
+        isWaitingForWorkoutShutdown = true
+        log("beginWorkoutShutdownForRestartIfNeeded: reason=\(reason)")
+        emitWindow(forceBackfillFlag: true)
+        extractionTask?.cancel()
+        extractionTask = nil
+        if let query = heartRateQuery {
+            healthStore.stop(query)
+        }
+        heartRateQuery = nil
+        stopWorkoutSession(waitForEnd: true) { [weak self] in
+            guard let self else { return }
+            self.isWaitingForWorkoutShutdown = false
+            guard let deferredStartCommand = self.deferredStartCommand else { return }
+            self.deferredStartCommand = nil
+            self.log("beginWorkoutShutdownForRestartIfNeeded: existing workout ended; starting deferred session \(deferredStartCommand.sessionId.uuidString)")
+            self.beginStartSessionBootstrap(with: deferredStartCommand)
+        }
     }
 
     private func shouldTreatAsDuplicateStart(_ command: WatchSyncCommand) -> Bool {
@@ -604,6 +649,8 @@ final class WatchRuntimeController: NSObject, ObservableObject {
 
     private func stopSession() {
         log("stopSession: stopping watch runtime")
+        deferredStartCommand = nil
+        isWaitingForWorkoutShutdown = false
         sendRuntimeStatus(.stopped, transportMode: currentTransportMode, preferMirroring: true)
         emitWindow(forceBackfillFlag: true)
         extractionTask?.cancel()
@@ -742,18 +789,36 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         }
     }
 
-    private func stopWorkoutSession() {
+    private func stopWorkoutSession(waitForEnd: Bool = false, onEnded: (() -> Void)? = nil) {
         let builder = workoutBuilder
         let session = workoutSession
         workoutBuilder = nil
         workoutSession = nil
 
-        guard let builder, let session else { return }
+        guard let builder, let session else {
+            onEnded?()
+            return
+        }
 
         let endDate = Date()
         session.end()
         builder.endCollection(withEnd: endDate) { _, _ in
             builder.discardWorkout()
+        }
+        guard waitForEnd else {
+            onEnded?()
+            return
+        }
+
+        Task { [weak self] in
+            let timeoutAt = Date().addingTimeInterval(5)
+            while Date() < timeoutAt, session.state != .ended {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            await MainActor.run {
+                self?.log("stopWorkoutSession: wait completed state=\(session.state.rawValue)")
+                onEnded?()
+            }
         }
     }
 

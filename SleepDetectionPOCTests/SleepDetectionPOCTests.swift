@@ -1292,6 +1292,28 @@ struct SleepDetectionPOCTests {
         #expect(!diagnosticEvents.contains(where: { $0.eventType == "custom.watchWorkoutFailed" }))
     }
 
+    @Test("LiveWatchProvider adopts recovered watch session ids for orphan cleanup")
+    func liveWatchProviderAdoptsRecoveredWatchSessionIdsForOrphanCleanup() {
+        let provider = LiveWatchProvider(systemTransportEnabled: false)
+        let sessionId = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_712_665_200)
+
+        provider.debugInject(
+            status: WatchRuntimeStatusPayload(
+                sessionId: sessionId,
+                state: .workoutStarted,
+                occurredAt: startedAt,
+                transportMode: .wcSessionFallback,
+                lastError: nil
+            ),
+            transportMode: .wcSessionFallback
+        )
+
+        #expect(provider.runtimeSnapshot().runtimeState == .workoutStarted)
+        provider.stop()
+        #expect(provider.runtimeSnapshot().runtimeState == .stopped)
+    }
+
     @Test("AppModel emits watch startup timeout diagnostics for no ACK and no first packet")
     @MainActor
     func appModelWatchStartupTimeoutDiagnostics() async throws {
@@ -1463,6 +1485,32 @@ struct SleepDetectionPOCTests {
             $0.payload["lastError"] == "Another session is starting"
         }))
         #expect(!capturedEvents.contains(where: { $0.eventType == "custom.watchWorkoutFailed" }))
+    }
+
+    @Test("AppModel requests orphan watch cleanup when no phone session is active")
+    @MainActor
+    func appModelRequestsOrphanWatchCleanupWhenNoPhoneSessionIsActive() {
+        let watchProvider = RecordingWatchProvider()
+        let model = AppModel(watchProvider: watchProvider)
+
+        model.debugApplyWatchRuntimeSnapshot(
+            WatchRuntimeSnapshot(
+                isSupported: true,
+                isPaired: true,
+                isWatchAppInstalled: true,
+                isReachable: false,
+                activationState: .activated,
+                runtimeState: .workoutStarted,
+                transportMode: .wcSessionFallback,
+                lastCommandAt: Date(timeIntervalSince1970: 1_712_665_200),
+                lastAckAt: Date(timeIntervalSince1970: 1_712_665_201),
+                lastWindowAt: nil,
+                lastError: nil,
+                pendingWindowCount: 0
+            )
+        )
+
+        #expect(watchProvider.stopCallCount == 1)
     }
 
     @Test("AppModel persists watch setup completion when watch becomes ready")
@@ -2039,6 +2087,7 @@ private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {
         pendingWindowCount: 0
     )
     private(set) var startedSessionIds: [UUID] = []
+    private(set) var stopCallCount = 0
 
     func start(session: Session) throws {
         startedSessionIds.append(session.sessionId)
@@ -2046,7 +2095,11 @@ private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {
     }
 
     func prepareRuntime(sessionId: UUID) throws {}
-    func stop() {}
+    func stop() {
+        stopCallCount += 1
+        snapshot.runtimeState = .stopped
+        snapshot.transportMode = .bootstrap
+    }
     func currentWindow() -> SensorWindowSnapshot? { nil }
     func drainPendingWindows() -> [FeatureWindow] { [] }
     func runtimeSnapshot() -> WatchRuntimeSnapshot { snapshot }

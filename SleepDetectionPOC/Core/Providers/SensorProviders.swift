@@ -571,7 +571,12 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 
     private func handle(status: WatchRuntimeStatusPayload, transportMode: WatchRuntimeSnapshot.TransportMode) {
-        let currentSessionId: UUID? = protectedState.withLock { $0.activeSessionId }
+        let currentSessionId: UUID? = protectedState.withLock { state in
+            if state.activeSessionId == nil {
+                state.activeSessionId = status.sessionId
+            }
+            return state.activeSessionId
+        }
         guard status.sessionId == currentSessionId else {
             appendDiagnostic(
                 stage: "incoming.status",
@@ -647,7 +652,12 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 
     private func handle(payload: WatchWindowPayload, transportMode: WatchRuntimeSnapshot.TransportMode) {
-        let currentSessionId: UUID? = protectedState.withLock { $0.activeSessionId }
+        let currentSessionId: UUID? = protectedState.withLock { state in
+            if state.activeSessionId == nil {
+                state.activeSessionId = payload.sessionId
+            }
+            return state.activeSessionId
+        }
         guard payload.sessionId == currentSessionId else {
             appendDiagnostic(
                 stage: "incoming.window",
