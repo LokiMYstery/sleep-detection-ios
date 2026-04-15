@@ -1134,6 +1134,8 @@ final class RouteEEngine: RouteEngine {
         var state: RouteEState = .monitoring
         var hasAnyWatchData = false
         var hasPartialWatch = false
+        var hasCompatibleWatchMotionSignal = false
+        var hasLegacyWatchMotionSignal = false
         var rejectionReason: String?
         var finalWatchMotionMet = false
         var finalHeartRateMet = false
@@ -1171,18 +1173,37 @@ final class RouteEEngine: RouteEngine {
             hasAnyWatchData = true
             lastAvailableWatchEndTime = window.endTime
 
-            let watchMotionMetForWindow = watch.wristAccelRMS < parameters.wristStillThreshold
-            if watch.wristAccelRMS > parameters.wristActiveThreshold {
-                lowMotionStreak = 0
-            } else if watchMotionMetForWindow {
-                lowMotionStreak += 1
+            let supportsRouteEMotionSignal = watch.supportsRouteEMotionSignal
+            if supportsRouteEMotionSignal {
+                hasCompatibleWatchMotionSignal = true
             } else {
+                hasLegacyWatchMotionSignal = true
+            }
+
+            let watchMotionMetForWindow: Bool
+            let watchMotionActive: Bool
+            if supportsRouteEMotionSignal {
+                watchMotionMetForWindow = watch.wristAccelRMS < parameters.wristStillThreshold
+                watchMotionActive = watch.wristAccelRMS > parameters.wristActiveThreshold
+                if watchMotionActive {
+                    lowMotionStreak = 0
+                } else if watchMotionMetForWindow {
+                    lowMotionStreak += 1
+                } else {
+                    lowMotionStreak = 0
+                }
+            } else {
+                watchMotionMetForWindow = false
+                watchMotionActive = false
                 lowMotionStreak = 0
             }
 
             let watchMotionMet =
-                lowMotionStreak >= parameters.wristStillWindowCount ||
-                watch.wristStillDuration >= Double(parameters.wristStillWindowCount) * 60
+                supportsRouteEMotionSignal &&
+                (
+                    lowMotionStreak >= parameters.wristStillWindowCount ||
+                    watch.wristStillDuration >= Double(parameters.wristStillWindowCount) * 60
+                )
 
             let sleepTarget = resolvedSleepTarget(from: priors)
             let hrDropThreshold = resolvedHRDropThreshold(from: priors)
@@ -1237,7 +1258,7 @@ final class RouteEEngine: RouteEngine {
                 hasPartialWatch = true
             }
 
-            if watch.wristAccelRMS > parameters.wristActiveThreshold {
+            if watchMotionActive {
                 rejectionReason = "wrist_active"
                 candidateStreak = 0
                 fullConfirmStreak = 0
@@ -1347,6 +1368,15 @@ final class RouteEEngine: RouteEngine {
                 predictedSleepOnset: nil,
                 confidence: .none,
                 evidenceSummary: "Watch warming up, waiting for first packet",
+                lastUpdated: timeline.last?.endTime ?? session.startTime,
+                isAvailable: true
+            )
+        } else if !hasCompatibleWatchMotionSignal && hasLegacyWatchMotionSignal {
+            prediction = RoutePrediction(
+                routeId: routeId,
+                predictedSleepOnset: nil,
+                confidence: .none,
+                evidenceSummary: "Watch motion signal outdated, update the Watch app",
                 lastUpdated: timeline.last?.endTime ?? session.startTime,
                 isAvailable: true
             )

@@ -748,7 +748,8 @@ struct SleepDetectionPOCTests {
                         wristStillDuration: 240,
                         heartRate: 58,
                         heartRateTrend: .dropping,
-                        dataQuality: .good
+                        dataQuality: .good,
+                        motionSignalVersion: .dynamicAccelerationV1
                     )
                 )
             )
@@ -860,7 +861,8 @@ struct SleepDetectionPOCTests {
                         wristStillDuration: 240,
                         heartRate: 58,
                         heartRateTrend: .dropping,
-                        dataQuality: .good
+                        dataQuality: .good,
+                        motionSignalVersion: .dynamicAccelerationV1
                     )
                 )
             )
@@ -870,6 +872,160 @@ struct SleepDetectionPOCTests {
         #expect(finalPrediction.isAvailable == true)
         #expect(finalPrediction.confidence == .confirmed)
         #expect(finalPrediction.predictedSleepOnset != nil)
+    }
+
+    @Test("Watch motion signal processor removes static gravity and preserves stillness duration")
+    func watchMotionSignalProcessorRemovesGravity() {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let samples = (0..<100).map { index in
+            WatchAccelerometerSample(
+                timestamp: start.addingTimeInterval(Double(index) / 50.0),
+                x: 0,
+                y: 0,
+                z: 1
+            )
+        }
+
+        let summary = WatchMotionSignalProcessor.summarize(
+            samples: samples,
+            windowEndTime: start.addingTimeInterval(2)
+        )
+
+        #expect(summary.wristAccelRMS < 0.001)
+        #expect(summary.wristStillDuration > 1.9)
+    }
+
+    @Test("Watch motion signal processor responds to orientation change even when magnitude stays near 1g")
+    func watchMotionSignalProcessorDetectsOrientationChange() {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let samples = (0..<100).map { index in
+            let progress = Double(index) / 99.0
+            let angle = progress * (.pi / 2)
+            return WatchAccelerometerSample(
+                timestamp: start.addingTimeInterval(Double(index) / 50.0),
+                x: sin(angle),
+                y: 0,
+                z: cos(angle)
+            )
+        }
+
+        let summary = WatchMotionSignalProcessor.summarize(
+            samples: samples,
+            windowEndTime: start.addingTimeInterval(2)
+        )
+
+        #expect(summary.wristAccelRMS > 0.05)
+        #expect(summary.wristStillDuration < 0.2)
+    }
+
+    @Test("Route E reports outdated watch motion when legacy watch payloads are received")
+    @MainActor
+    func routeEFlagsLegacyWatchMotionSignal() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            hrConfirmSampleCount: 2,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 2,
+            extendedConfirmWindowCount: 2,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let engine = RouteEEngine(settings: settings)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P1,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: 70,
+                sleepHRTarget: 60,
+                hrDropThreshold: 8
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(accelRMS: 0.005, peakCount: 0, attitudeChangeRate: 0, maxAccel: 0.01, stillRatio: 1, stillDuration: 30),
+                audio: nil,
+                interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 180, screenWakeCount: 0, lastInteractionAt: start),
+                watch: nil
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 1,
+                startTime: start.addingTimeInterval(120),
+                endTime: start.addingTimeInterval(240),
+                duration: 120,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 1.0,
+                    wristStillDuration: 0,
+                    heartRate: 67,
+                    heartRateTrend: .stable,
+                    dataQuality: .good
+                )
+            )
+        )
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.isAvailable == true)
+        #expect(prediction.confidence == .none)
+        #expect(prediction.evidenceSummary.contains("outdated"))
+    }
+
+    @Test("Watch window payload decoding treats missing motion signal version as legacy raw data")
+    func watchWindowPayloadDecodesLegacyMotionSignalVersion() throws {
+        let legacyJSON = """
+        {
+          "sessionId": "00000000-0000-0000-0000-000000000001",
+          "windowId": 7,
+          "startTime": "2024-04-05T01:02:03Z",
+          "endTime": "2024-04-05T01:04:03Z",
+          "sentAt": "2024-04-05T01:04:05Z",
+          "isBackfilled": false,
+          "wristAccelRMS": 0.998,
+          "wristStillDuration": 0,
+          "heartRate": 58,
+          "heartRateSamples": [],
+          "dataQuality": "good"
+        }
+        """
+
+        let payload = try JSONDecoder.iso8601.decode(
+            WatchWindowPayload.self,
+            from: Data(legacyJSON.utf8)
+        )
+
+        #expect(payload.motionSignalVersion == nil)
+        #expect(payload.effectiveMotionSignalVersion == .rawMagnitudeV0)
     }
 
     @Test("LiveWatchProvider keeps the start command pending until ACK arrives")
@@ -980,7 +1136,8 @@ struct SleepDetectionPOCTests {
                     .init(timestamp: start.addingTimeInterval(60), bpm: 65),
                     .init(timestamp: start.addingTimeInterval(110), bpm: 60)
                 ],
-                dataQuality: .good
+                dataQuality: .good,
+                motionSignalVersion: .dynamicAccelerationV1
             ),
             transportMode: .mirroredWorkoutSession
         )
@@ -995,6 +1152,7 @@ struct SleepDetectionPOCTests {
         #expect(mirroredWindows.first?.source == .watch)
         #expect(mirroredWindows.first?.watch?.heartRate == 60)
         #expect(mirroredWindows.first?.watch?.heartRateTrend == .dropping)
+        #expect(mirroredWindows.first?.watch?.motionSignalVersion == .dynamicAccelerationV1)
 
         provider.debugInject(
             window: WatchWindowPayload(
@@ -1011,7 +1169,8 @@ struct SleepDetectionPOCTests {
                     .init(timestamp: start.addingTimeInterval(130), bpm: 60),
                     .init(timestamp: start.addingTimeInterval(190), bpm: 59)
                 ],
-                dataQuality: .partial
+                dataQuality: .partial,
+                motionSignalVersion: .dynamicAccelerationV1
             ),
             transportMode: .wcSessionFallback
         )
@@ -1445,6 +1604,10 @@ struct SleepDetectionPOCTests {
             lastRepairDecision: "suppressedSessionActivation",
             echoCancelledInputAvailable: false,
             echoCancelledInputEnabled: false,
+            bundledPlaybackAvailable: true,
+            bundledPlaybackEnabled: false,
+            bundledPlaybackAssetName: "0001ZM20251208_A",
+            bundledPlaybackError: nil,
             aggregatedIOPreferenceError: nil,
             rawCaptureError: nil,
             lastError: "Input format is unavailable for the current audio route"

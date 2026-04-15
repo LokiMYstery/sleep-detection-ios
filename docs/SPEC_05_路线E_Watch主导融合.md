@@ -41,7 +41,7 @@
 
 ```swift
 struct WatchFeatures {
-    let wristAccelRMS: Double          // 腕部加速度 RMS (g)
+    let wristAccelRMS: Double          // 去重力后的动态腕部加速度 RMS (g)
     let wristStillDuration: TimeInterval // 当前连续低动时长 (秒)
     let heartRate: Double?             // 当前心率 (bpm)，可能缺失
     let heartRateTrend: HRTrend?       // 心率趋势
@@ -263,7 +263,7 @@ Watch App 启动：
     ↓
 定时任务（每 1-3 分钟触发）：
   ├── 从 CMSensorRecorder 提取最新加速度数据
-  ├── 计算窗口级特征摘要（wristAccelRMS, wristStillDuration）
+  ├── 先做重力补偿，再计算窗口级特征摘要（wristAccelRMS, wristStillDuration）
   ├── 附加最新心率样本
   └── 通过 WCSession 回传 WatchWindowPayload 到 iPhone
     ↓

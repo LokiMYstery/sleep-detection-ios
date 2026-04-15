@@ -72,6 +72,7 @@
   - 系统自动在后台以 50Hz 录制加速度数据。
   - 数据最多保留 3 天。
   - 检索时有 **最多 3 分钟的延迟**。
+  - 取回的是 raw accelerometer，**包含重力分量**；如需 `wristAccelRMS` / `wristStillDuration` 这类低动特征，必须先做重力补偿。
   - 非常省电，是苹果原生睡眠追踪也使用的底层机制。
 - 心率获取：使用 `HKAnchoredObjectQuery` 的 updateHandler，Watch 上直接监听新心率样本。watchOS 在佩戴状态下自动采集心率（约每 5-10 分钟一次，夜间可能更频繁）。
 - **缺点**：
@@ -91,7 +92,7 @@ Watch App 职责：
 ├── HKAnchoredObjectQuery：监听新心率样本
 ├── 定时任务（Background App Refresh 或 Complication 更新触发）：
 │   ├── 每 1-3 分钟从 CMSensorRecorder 提取最新加速度数据
-│   ├── 提取后计算窗口级特征摘要（wristAccelRMS, wristStillDuration）
+│   ├── 提取后先做重力补偿，再计算窗口级特征摘要（wristAccelRMS, wristStillDuration）
 │   └── 通过 WCSession 回传特征摘要到 iPhone
 └── 在 iPhone 不可达时，本地缓存特征摘要待补传
 ```

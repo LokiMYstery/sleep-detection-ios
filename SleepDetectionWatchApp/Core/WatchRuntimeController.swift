@@ -864,6 +864,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
 
         let accelerometerSamples = recordedAccelerometerSamples(from: start, to: end)
         let heartSamples = heartRateSamples.filter { $0.timestamp >= start && $0.timestamp <= end }
+        let motionSummary = watchMotionSummary(from: accelerometerSamples, windowEndTime: end)
         let payload = WatchWindowPayload(
             sessionId: command.sessionId,
             windowId: nextWindowId,
@@ -871,11 +872,12 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             endTime: end,
             sentAt: Date(),
             isBackfilled: forceBackfillFlag || currentTransportMode != .mirroredWorkoutSession,
-            wristAccelRMS: accelerometerRMS(from: accelerometerSamples),
-            wristStillDuration: trailingStillDuration(from: accelerometerSamples),
+            wristAccelRMS: motionSummary.wristAccelRMS,
+            wristStillDuration: motionSummary.wristStillDuration,
             heartRate: heartSamples.last?.bpm ?? latestHeartRate,
             heartRateSamples: heartSamples,
-            dataQuality: dataQuality(accelerometerSamples: accelerometerSamples, heartSamples: heartSamples)
+            dataQuality: dataQuality(accelerometerSamples: accelerometerSamples, heartSamples: heartSamples),
+            motionSignalVersion: .dynamicAccelerationV1
         )
 
         log("emitWindow: windowId=\(payload.windowId) quality=\(payload.dataQuality.rawValue) hrSamples=\(payload.heartRateSamples.count) transport=\(currentTransportMode.rawValue) backfilled=\(payload.isBackfilled)")
@@ -1068,38 +1070,24 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         return samples.sorted { $0.startDate < $1.startDate }
     }
 
-    private func accelerometerRMS(from samples: [CMRecordedAccelerometerData]) -> Double {
-        guard !samples.isEmpty else { return 0 }
-        let magnitudes = samples.map { sample in
+    private func watchMotionSummary(
+        from samples: [CMRecordedAccelerometerData],
+        windowEndTime: Date
+    ) -> WatchMotionWindowSummary {
+        let normalizedSamples = samples.map { sample in
             let acceleration = sample.acceleration
-            return sqrt(
-                acceleration.x * acceleration.x +
-                acceleration.y * acceleration.y +
-                acceleration.z * acceleration.z
+            return WatchAccelerometerSample(
+                timestamp: sample.startDate,
+                x: acceleration.x,
+                y: acceleration.y,
+                z: acceleration.z
             )
         }
-        let squaredMean = magnitudes.reduce(0) { $0 + ($1 * $1) } / Double(magnitudes.count)
-        return sqrt(squaredMean)
-    }
-
-    private func trailingStillDuration(from samples: [CMRecordedAccelerometerData]) -> TimeInterval {
-        guard !samples.isEmpty else { return 0 }
-        let threshold = 0.015
-        var stillCount = 0
-        for sample in samples.reversed() {
-            let acceleration = sample.acceleration
-            let magnitude = sqrt(
-                acceleration.x * acceleration.x +
-                acceleration.y * acceleration.y +
-                acceleration.z * acceleration.z
-            )
-            if magnitude < threshold {
-                stillCount += 1
-            } else {
-                break
-            }
-        }
-        return Double(stillCount) / 50.0
+        return WatchMotionSignalProcessor.summarize(
+            samples: normalizedSamples,
+            windowEndTime: windowEndTime,
+            stillnessThreshold: RouteEParameters.default.wristStillThreshold
+        )
     }
 
     private func dataQuality(

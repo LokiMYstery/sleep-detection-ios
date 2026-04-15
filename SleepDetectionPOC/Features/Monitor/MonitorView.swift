@@ -113,7 +113,7 @@ struct MonitorView: View {
                         }
                         if let watch = window.watch {
                             Text(
-                                "watch RMS \(watch.wristAccelRMS, specifier: "%.3f"), still \(watch.wristStillDuration, specifier: "%.0f")s, HR \(watch.heartRate.map { String(format: "%.1f", $0) } ?? "-"), trend \(watch.heartRateTrend.rawValue)"
+                                "watch RMS \(watch.wristAccelRMS, specifier: "%.3f"), still \(watch.wristStillDuration, specifier: "%.0f")s, HR \(watch.heartRate.map { String(format: "%.1f", $0) } ?? "-"), trend \(watch.heartRateTrend.rawValue), signal \(watch.effectiveMotionSignalVersion.rawValue)"
                             )
                             .font(.caption)
                         }

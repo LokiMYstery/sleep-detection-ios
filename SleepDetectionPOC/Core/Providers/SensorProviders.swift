@@ -684,7 +684,8 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
                 wristStillDuration: payload.wristStillDuration,
                 heartRate: payload.heartRate,
                 heartRateTrend: heartRateTrend,
-                dataQuality: payload.dataQuality
+                dataQuality: payload.dataQuality,
+                motionSignalVersion: payload.motionSignalVersion
             )
 
             state.latestWatch = watchFeatures

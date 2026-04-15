@@ -635,6 +635,96 @@ struct InteractionFeatures: Codable, Equatable, Sendable {
     var lastInteractionAt: Date?
 }
 
+enum WatchMotionSignalVersion: String, Codable, Sendable {
+    case rawMagnitudeV0
+    case dynamicAccelerationV1
+}
+
+struct WatchAccelerometerSample: Equatable, Sendable {
+    var timestamp: Date
+    var x: Double
+    var y: Double
+    var z: Double
+}
+
+struct WatchMotionWindowSummary: Equatable, Sendable {
+    var wristAccelRMS: Double
+    var wristStillDuration: TimeInterval
+}
+
+enum WatchMotionSignalProcessor {
+    static func summarize(
+        samples: [WatchAccelerometerSample],
+        windowEndTime: Date? = nil,
+        stillnessThreshold: Double = RouteEParameters.default.wristStillThreshold,
+        gravityTimeConstant: TimeInterval = 1.0,
+        fallbackSampleInterval: TimeInterval = 1.0 / 50.0
+    ) -> WatchMotionWindowSummary {
+        guard !samples.isEmpty else {
+            return WatchMotionWindowSummary(wristAccelRMS: 0, wristStillDuration: 0)
+        }
+
+        let sortedSamples = samples.sorted { $0.timestamp < $1.timestamp }
+        let fallbackInterval = max(fallbackSampleInterval, 0.001)
+        let timeConstant = max(gravityTimeConstant, fallbackInterval)
+
+        var gravityX = sortedSamples[0].x
+        var gravityY = sortedSamples[0].y
+        var gravityZ = sortedSamples[0].z
+        var dynamicMagnitudes: [Double] = []
+        dynamicMagnitudes.reserveCapacity(sortedSamples.count)
+        var sampleDurations = Array(repeating: fallbackInterval, count: sortedSamples.count)
+
+        for index in sortedSamples.indices {
+            let sample = sortedSamples[index]
+            if index > 0 {
+                let previousTimestamp = sortedSamples[index - 1].timestamp
+                let measuredInterval = sample.timestamp.timeIntervalSince(previousTimestamp)
+                let dt = measuredInterval > 0 ? measuredInterval : fallbackInterval
+                let alpha = exp(-dt / timeConstant)
+                gravityX = alpha * gravityX + (1 - alpha) * sample.x
+                gravityY = alpha * gravityY + (1 - alpha) * sample.y
+                gravityZ = alpha * gravityZ + (1 - alpha) * sample.z
+            }
+
+            let dynamicX = sample.x - gravityX
+            let dynamicY = sample.y - gravityY
+            let dynamicZ = sample.z - gravityZ
+            let dynamicMagnitude = sqrt(
+                dynamicX * dynamicX +
+                dynamicY * dynamicY +
+                dynamicZ * dynamicZ
+            )
+            dynamicMagnitudes.append(dynamicMagnitude)
+
+            if index < sortedSamples.count - 1 {
+                let nextTimestamp = sortedSamples[index + 1].timestamp
+                let measuredInterval = nextTimestamp.timeIntervalSince(sample.timestamp)
+                sampleDurations[index] = measuredInterval > 0 ? measuredInterval : fallbackInterval
+            } else if let windowEndTime {
+                let trailingInterval = windowEndTime.timeIntervalSince(sample.timestamp)
+                sampleDurations[index] = trailingInterval > 0 ? trailingInterval : fallbackInterval
+            }
+        }
+
+        let squaredMean = dynamicMagnitudes.reduce(0) { partial, magnitude in
+            partial + magnitude * magnitude
+        } / Double(dynamicMagnitudes.count)
+        let wristAccelRMS = sqrt(squaredMean)
+
+        var wristStillDuration: TimeInterval = 0
+        for index in dynamicMagnitudes.indices.reversed() {
+            guard dynamicMagnitudes[index] < stillnessThreshold else { break }
+            wristStillDuration += sampleDurations[index]
+        }
+
+        return WatchMotionWindowSummary(
+            wristAccelRMS: wristAccelRMS,
+            wristStillDuration: wristStillDuration
+        )
+    }
+}
+
 struct WatchFeatures: Codable, Equatable, Sendable {
     enum HRTrend: String, Codable, Sendable {
         case dropping
@@ -654,6 +744,15 @@ struct WatchFeatures: Codable, Equatable, Sendable {
     var heartRate: Double?
     var heartRateTrend: HRTrend
     var dataQuality: DataQuality
+    var motionSignalVersion: WatchMotionSignalVersion? = nil
+
+    var effectiveMotionSignalVersion: WatchMotionSignalVersion {
+        motionSignalVersion ?? .rawMagnitudeV0
+    }
+
+    var supportsRouteEMotionSignal: Bool {
+        effectiveMotionSignalVersion == .dynamicAccelerationV1
+    }
 }
 
 struct PhysiologyFeatures: Codable, Equatable, Sendable {
@@ -1092,6 +1191,11 @@ struct WatchWindowPayload: Codable, Equatable, Sendable {
     var heartRate: Double?
     var heartRateSamples: [HRSample]
     var dataQuality: WatchFeatures.DataQuality
+    var motionSignalVersion: WatchMotionSignalVersion? = nil
+
+    var effectiveMotionSignalVersion: WatchMotionSignalVersion {
+        motionSignalVersion ?? .rawMagnitudeV0
+    }
 }
 
 struct StoredPredictions: Codable, Equatable, Sendable {
