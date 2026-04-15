@@ -815,6 +815,7 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
                 wristAccelRMS: payload.wristAccelRMS,
                 wristStillDuration: payload.wristStillDuration,
                 heartRate: payload.heartRate,
+                heartRateSampleDate: payload.heartRateSamples.map(\.timestamp).max(),
                 heartRateTrend: heartRateTrend,
                 dataQuality: payload.dataQuality,
                 motionSignalVersion: payload.motionSignalVersion

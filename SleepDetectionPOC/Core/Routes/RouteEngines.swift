@@ -1384,16 +1384,45 @@ final class RouteEEngine: RouteEngine {
         var capturedAt: Date
     }
 
+    private struct WatchSnapshot {
+        var windowId: Int
+        var startTime: Date
+        var endTime: Date
+        var features: WatchFeatures
+    }
+
+    private struct HeartRateSamplePoint: Hashable {
+        var timestamp: Date
+        var bpm: Double
+    }
+
+    private struct BreakingContext {
+        var reason: String
+        var channel: String
+        var signal: String
+        var windowId: Int
+        var sourceWatchWindowId: Int?
+        var rms: Double?
+        var heartRate: Double?
+        var heartRateSampleDate: Date?
+        var interactionState: String
+        var motionPickupDetected: Bool
+    }
+
     private struct EvaluationResult {
         var prediction: RoutePrediction
         var state: RouteEState
         var candidateTime: Date?
+        var candidateAt: Date?
+        var confirmedAt: Date?
         var watchMotionMet: Bool
         var heartRateMet: Bool
         var interactionMet: Bool
         var confirmType: String?
-        var confirmHeartRate: Double?
-        var rejectionReason: String?
+        var currentHeartRate: Double?
+        var currentHeartRateSampleDate: Date?
+        var heartRateTrend: WatchFeatures.HRTrend
+        var breakingContext: BreakingContext?
         var hasPartialWatch: Bool
         var lastWatchWindowId: Int?
     }
@@ -1485,35 +1514,49 @@ final class RouteEEngine: RouteEngine {
                 if lhs.source == rhs.source {
                     return lhs.windowId < rhs.windowId
                 }
-                return lhs.source == .iphone
+                return sourcePriority(lhs.source) < sourcePriority(rhs.source)
             }
             return lhs.endTime < rhs.endTime
         }
 
         var latestInteraction: InteractionSnapshot?
         var latestMotion: MotionSnapshot?
+        var latestWatch: WatchSnapshot?
+        var heartRateSamples: [HeartRateSamplePoint] = []
+        var seenHeartRateSamples: Set<HeartRateSamplePoint> = []
         var lowMotionStreak = 0
         var hrTargetStreak = 0
         var hrTrendStreak = 0
         var risingHRStreak = 0
+        var consecutiveActiveWatchWindows = 0
         var candidateStreak = 0
         var fullConfirmStreak = 0
         var watchDoubleStreak = 0
         var candidateTime: Date?
+        var candidateAt: Date?
+        var confirmedAt: Date?
         var predictedTime: Date?
         var state: RouteEState = .monitoring
         var hasAnyWatchData = false
         var hasPartialWatch = false
         var hasCompatibleWatchMotionSignal = false
         var hasLegacyWatchMotionSignal = false
-        var rejectionReason: String?
         var finalWatchMotionMet = false
         var finalHeartRateMet = false
         var finalInteractionMet = false
         var confirmType: String?
-        var confirmHeartRate: Double?
+        var currentHeartRate: Double?
+        var currentHeartRateSampleDate: Date?
+        var currentHeartRateTrend: WatchFeatures.HRTrend = .insufficient
+        var breakingContext: BreakingContext?
         var lastWatchWindowId: Int?
         var lastAvailableWatchEndTime: Date?
+        var lastDerivedWatchWindowId: Int?
+        var candidateCountedWatchWindowIds: Set<Int> = []
+        var fullConfirmCountedWatchWindowIds: Set<Int> = []
+        var watchDoubleCountedWatchWindowIds: Set<Int> = []
+        let sleepTarget = resolvedSleepTarget(from: priors)
+        let hrDropThreshold = resolvedHRDropThreshold(from: priors)
 
         for window in timeline {
             if let interaction = window.interaction {
@@ -1523,49 +1566,154 @@ final class RouteEEngine: RouteEngine {
                 latestMotion = MotionSnapshot(features: motion, capturedAt: window.endTime)
             }
 
-            guard let watch = window.watch else { continue }
-            lastWatchWindowId = window.windowId
+            if let watch = window.watch {
+                lastWatchWindowId = window.windowId
 
-            if let lastAvailableWatchEndTime,
-               window.startTime.timeIntervalSince(lastAvailableWatchEndTime) > parameters.disconnectGraceMinutes * 60 {
-                hasPartialWatch = true
+                if let lastAvailableWatchEndTime,
+                   window.startTime.timeIntervalSince(lastAvailableWatchEndTime) > parameters.disconnectGraceMinutes * 60 {
+                    hasPartialWatch = true
+                }
+
+                if watch.dataQuality == .unavailable {
+                    hasPartialWatch = true
+                    latestWatch = nil
+                    lowMotionStreak = 0
+                    hrTargetStreak = 0
+                    hrTrendStreak = 0
+                    risingHRStreak = 0
+                    consecutiveActiveWatchWindows = 0
+                } else {
+                    hasAnyWatchData = true
+                    lastAvailableWatchEndTime = window.endTime
+                    if watch.dataQuality == .partial {
+                        hasPartialWatch = true
+                    }
+                    if watch.supportsRouteEMotionSignal {
+                        hasCompatibleWatchMotionSignal = true
+                    } else {
+                        hasLegacyWatchMotionSignal = true
+                    }
+
+                    if let heartRate = watch.heartRate {
+                        let sample = HeartRateSamplePoint(
+                            timestamp: watch.heartRateSampleDate ?? window.endTime,
+                            bpm: heartRate
+                        )
+                        if seenHeartRateSamples.insert(sample).inserted {
+                            heartRateSamples.append(sample)
+                        }
+                    }
+
+                    latestWatch = WatchSnapshot(
+                        windowId: window.windowId,
+                        startTime: window.startTime,
+                        endTime: window.endTime,
+                        features: watch
+                    )
+                }
             }
 
-            if watch.dataQuality == .unavailable {
-                hasPartialWatch = true
-                lowMotionStreak = 0
-                hrTargetStreak = 0
-                hrTrendStreak = 0
-                risingHRStreak = 0
+            let matchedWatch = freshWatchSnapshot(
+                latestWatch,
+                at: window.endTime,
+                freshnessMinutes: parameters.watchFreshnessMinutes
+            )
+            guard let matchedWatch else {
+                finalWatchMotionMet = false
+                finalHeartRateMet = false
+                finalInteractionMet = interactionSatisfied(
+                    at: window.endTime,
+                    interaction: latestInteraction,
+                    motion: latestMotion,
+                    parameters: parameters
+                )
+                currentHeartRate = nil
+                currentHeartRateSampleDate = nil
+                currentHeartRateTrend = .insufficient
+
+                if state == .candidate {
+                    breakingContext = makeBreakingContext(
+                        reason: "watch_data_stale",
+                        channel: "watchFreshness",
+                        window: window,
+                        matchedWatch: latestWatch,
+                        interaction: latestInteraction,
+                        motion: latestMotion,
+                        evaluationTime: window.endTime
+                    )
+                }
+
+                candidateStreak = 0
+                fullConfirmStreak = 0
+                watchDoubleStreak = 0
+                candidateTime = nil
+                candidateAt = nil
+                if state != .confirmed {
+                    predictedTime = nil
+                    state = .monitoring
+                }
                 continue
             }
 
-            hasAnyWatchData = true
-            lastAvailableWatchEndTime = window.endTime
-
+            let watch = matchedWatch.features
+            let heartRateTrend = resolvedHeartRateTrend(
+                samples: heartRateSamples,
+                matchedWatch: matchedWatch,
+                parameters: parameters
+            )
+            let isNewDerivedWatchWindow = lastDerivedWatchWindowId != matchedWatch.windowId
             let supportsRouteEMotionSignal = watch.supportsRouteEMotionSignal
-            if supportsRouteEMotionSignal {
-                hasCompatibleWatchMotionSignal = true
-            } else {
-                hasLegacyWatchMotionSignal = true
-            }
+            let watchMotionMetForWindow = supportsRouteEMotionSignal && watch.wristAccelRMS < parameters.wristStillThreshold
+            let watchMotionActive = supportsRouteEMotionSignal && watch.wristAccelRMS > parameters.wristActiveThreshold
 
-            let watchMotionMetForWindow: Bool
-            let watchMotionActive: Bool
-            if supportsRouteEMotionSignal {
-                watchMotionMetForWindow = watch.wristAccelRMS < parameters.wristStillThreshold
-                watchMotionActive = watch.wristAccelRMS > parameters.wristActiveThreshold
-                if watchMotionActive {
-                    lowMotionStreak = 0
-                } else if watchMotionMetForWindow {
-                    lowMotionStreak += 1
+            if isNewDerivedWatchWindow {
+                lastDerivedWatchWindowId = matchedWatch.windowId
+
+                if supportsRouteEMotionSignal {
+                    if watchMotionActive {
+                        consecutiveActiveWatchWindows += 1
+                        lowMotionStreak = 0
+                    } else {
+                        consecutiveActiveWatchWindows = 0
+                        if watchMotionMetForWindow {
+                            lowMotionStreak += 1
+                        } else {
+                            lowMotionStreak = 0
+                        }
+                    }
                 } else {
                     lowMotionStreak = 0
+                    consecutiveActiveWatchWindows = 0
                 }
-            } else {
-                watchMotionMetForWindow = false
-                watchMotionActive = false
-                lowMotionStreak = 0
+
+                if let heartRate = watch.heartRate, let sleepTarget {
+                    if heartRate <= sleepTarget {
+                        hrTargetStreak += 1
+                    } else {
+                        hrTargetStreak = 0
+                    }
+                } else if watch.heartRate != nil {
+                    hrTargetStreak = 0
+                }
+
+                if heartRateTrend == .rising {
+                    risingHRStreak += 1
+                } else if heartRateTrend != .insufficient {
+                    risingHRStreak = 0
+                }
+
+                let heartRateTrendMet =
+                    isHeartRateTrendQualified(
+                        trend: heartRateTrend,
+                        heartRate: watch.heartRate,
+                        priors: priors,
+                        hrDropThreshold: hrDropThreshold
+                    )
+                if heartRateTrendMet {
+                    hrTrendStreak += 1
+                } else if heartRateTrend != .insufficient {
+                    hrTrendStreak = 0
+                }
             }
 
             let watchMotionMet =
@@ -1574,45 +1722,16 @@ final class RouteEEngine: RouteEngine {
                     lowMotionStreak >= parameters.wristStillWindowCount ||
                     watch.wristStillDuration >= Double(parameters.wristStillWindowCount) * 60
                 )
-
-            let sleepTarget = resolvedSleepTarget(from: priors)
-            let hrDropThreshold = resolvedHRDropThreshold(from: priors)
-            if let heartRate = watch.heartRate, let sleepTarget {
-                if heartRate <= sleepTarget {
-                    hrTargetStreak += 1
-                } else {
-                    hrTargetStreak = 0
-                }
-            } else if watch.heartRate != nil {
-                hrTargetStreak = 0
-            }
-
-            if watch.heartRateTrend == .rising {
-                risingHRStreak += 1
-            } else {
-                risingHRStreak = 0
-            }
-
-            let heartRateTrendMet: Bool
-            if
-                let baseline = priors.preSleepHRBaseline ?? priors.sleepHRTarget.map({ $0 / 0.85 }),
-                let heartRate = watch.heartRate,
-                watch.heartRateTrend == .dropping,
-                baseline - heartRate >= hrDropThreshold * 0.6
-            {
-                hrTrendStreak += 1
-                heartRateTrendMet = true
-            } else {
-                if watch.heartRateTrend != .insufficient {
-                    hrTrendStreak = 0
-                }
-                heartRateTrendMet = false
-            }
-
+            let heartRateTrendMet =
+                isHeartRateTrendQualified(
+                    trend: heartRateTrend,
+                    heartRate: watch.heartRate,
+                    priors: priors,
+                    hrDropThreshold: hrDropThreshold
+                )
             let heartRateMet =
                 hrTargetStreak >= parameters.hrConfirmSampleCount ||
                 (heartRateTrendMet && hrTrendStreak >= parameters.hrTrendWindowCount)
-
             let interactionMet = interactionSatisfied(
                 at: window.endTime,
                 interaction: latestInteraction,
@@ -1623,30 +1742,61 @@ final class RouteEEngine: RouteEngine {
             finalWatchMotionMet = watchMotionMet
             finalHeartRateMet = heartRateMet
             finalInteractionMet = interactionMet
-
-            if watch.dataQuality == .partial {
-                hasPartialWatch = true
-            }
+            currentHeartRate = watch.heartRate
+            currentHeartRateSampleDate = watch.heartRateSampleDate ?? matchedWatch.endTime
+            currentHeartRateTrend = heartRateTrend
 
             if watchMotionActive {
-                rejectionReason = "wrist_active"
-                candidateStreak = 0
-                fullConfirmStreak = 0
-                watchDoubleStreak = 0
-                candidateTime = nil
-                if state != .confirmed {
-                    predictedTime = nil
-                    state = .monitoring
+                if consecutiveActiveWatchWindows >= parameters.wristActiveResetWindowCount {
+                    if state == .candidate {
+                        breakingContext = makeBreakingContext(
+                            reason: "wrist_active",
+                            channel: "watchMotion",
+                            window: window,
+                            matchedWatch: matchedWatch,
+                            interaction: latestInteraction,
+                            motion: latestMotion,
+                            evaluationTime: window.endTime
+                        )
+                    }
+                    candidateStreak = 0
+                    fullConfirmStreak = 0
+                    watchDoubleStreak = 0
+                    candidateTime = nil
+                    candidateAt = nil
+                    if state != .confirmed {
+                        predictedTime = nil
+                        state = .monitoring
+                    }
+                } else {
+                    candidateStreak = state == .candidate ? candidateStreak : 0
+                    fullConfirmStreak = 0
+                    watchDoubleStreak = 0
+                    if state != .candidate && state != .confirmed {
+                        candidateTime = nil
+                        predictedTime = nil
+                    }
                 }
                 continue
             }
 
             if risingHRStreak > 2 {
-                rejectionReason = "heart_rate_rising"
+                if state == .candidate {
+                    breakingContext = makeBreakingContext(
+                        reason: "heart_rate_rising",
+                        channel: "watchHeartRate",
+                        window: window,
+                        matchedWatch: matchedWatch,
+                        interaction: latestInteraction,
+                        motion: latestMotion,
+                        evaluationTime: window.endTime
+                    )
+                }
                 candidateStreak = 0
                 fullConfirmStreak = 0
                 watchDoubleStreak = 0
                 candidateTime = nil
+                candidateAt = nil
                 if state != .confirmed {
                     predictedTime = nil
                     state = .monitoring
@@ -1661,45 +1811,76 @@ final class RouteEEngine: RouteEngine {
             let watchDoubleConfirmed = watchMotionMet && heartRateMet
 
             if candidateMet {
-                if candidateStreak == 0 {
-                    candidateTime = window.startTime
+                let contributesNewCandidate = candidateCountedWatchWindowIds.insert(matchedWatch.windowId).inserted
+                if contributesNewCandidate {
+                    if candidateStreak == 0 {
+                        candidateTime = matchedWatch.startTime
+                    }
+                    candidateStreak += 1
                 }
-                candidateStreak += 1
-                fullConfirmStreak = fullyConfirmed ? (fullConfirmStreak + 1) : 0
-                watchDoubleStreak = watchDoubleConfirmed ? (watchDoubleStreak + 1) : 0
+
+                if contributesNewCandidate && !fullyConfirmed {
+                    fullConfirmStreak = 0
+                }
+                if fullyConfirmed, fullConfirmCountedWatchWindowIds.insert(matchedWatch.windowId).inserted {
+                    fullConfirmStreak += 1
+                }
+
+                if contributesNewCandidate && !watchDoubleConfirmed {
+                    watchDoubleStreak = 0
+                }
+                if watchDoubleConfirmed, watchDoubleCountedWatchWindowIds.insert(matchedWatch.windowId).inserted {
+                    watchDoubleStreak += 1
+                }
+
+                if candidateAt == nil, candidateStreak >= parameters.candidateWindowCount {
+                    candidateAt = window.endTime
+                    state = .candidate
+                    predictedTime = candidateTime
+                } else if state == .candidate {
+                    predictedTime = candidateTime
+                }
 
                 if fullConfirmStreak >= parameters.confirmWindowCount {
                     state = .confirmed
                     predictedTime = candidateTime
+                    confirmedAt = window.endTime
                     confirmType = "allChannels"
-                    confirmHeartRate = watch.heartRate
                     break
                 }
 
                 if watchDoubleStreak >= parameters.extendedConfirmWindowCount {
                     state = .confirmed
                     predictedTime = candidateTime
+                    confirmedAt = window.endTime
                     confirmType = "watchDoubleChannel"
-                    confirmHeartRate = watch.heartRate
                     break
-                }
-
-                if candidateStreak >= parameters.candidateWindowCount {
-                    state = .candidate
-                    predictedTime = candidateTime
                 }
             } else {
                 if state == .candidate {
-                    rejectionReason = rejectionReason ?? rejectionReasonFor(
-                        watchMotionMet: watchMotionMet,
-                        heartRateMet: heartRateMet,
-                        interactionMet: interactionMet
+                    breakingContext = makeBreakingContext(
+                        reason: rejectionReasonFor(
+                            watchMotionMet: watchMotionMet,
+                            heartRateMet: heartRateMet,
+                            interactionMet: interactionMet
+                        ),
+                        channel: rejectionChannel(
+                            watchMotionMet: watchMotionMet,
+                            heartRateMet: heartRateMet,
+                            interactionMet: interactionMet
+                        ),
+                        window: window,
+                        matchedWatch: matchedWatch,
+                        interaction: latestInteraction,
+                        motion: latestMotion,
+                        evaluationTime: window.endTime
                     )
                 }
                 candidateStreak = 0
                 fullConfirmStreak = 0
                 watchDoubleStreak = 0
                 candidateTime = nil
+                candidateAt = nil
                 if state != .confirmed {
                     predictedTime = nil
                     state = .monitoring
@@ -1712,16 +1893,22 @@ final class RouteEEngine: RouteEngine {
             prediction = RoutePrediction(
                 routeId: routeId,
                 predictedSleepOnset: predictedTime,
+                candidateAt: candidateAt,
+                confirmedAt: confirmedAt,
+                actionReadyAt: confirmedAt,
                 confidence: .confirmed,
                 evidenceSummary: "Watch fusion confirmed from \(predictedTime.formattedTime)",
                 lastUpdated: timeline.last?.endTime ?? session.startTime,
-                isAvailable: true
+                isAvailable: true,
+                supportsImmediateAction: false,
+                isLatched: true
             )
         } else if state == .candidate, let predictedTime {
             let confidence: SleepConfidence = candidateStreak > settings.routeEParameters.candidateWindowCount ? .suspected : .candidate
             prediction = RoutePrediction(
                 routeId: routeId,
                 predictedSleepOnset: predictedTime,
+                candidateAt: candidateAt,
                 confidence: confidence,
                 evidenceSummary: "Watch fusion candidate. Wrist \(finalWatchMotionMet ? "met" : "pending"), HR \(finalHeartRateMet ? "met" : "pending"), iPhone \(finalInteractionMet ? "met" : "pending")",
                 lastUpdated: timeline.last?.endTime ?? session.startTime,
@@ -1767,12 +1954,16 @@ final class RouteEEngine: RouteEngine {
             prediction: prediction,
             state: state,
             candidateTime: predictedTime,
+            candidateAt: candidateAt,
+            confirmedAt: confirmedAt,
             watchMotionMet: finalWatchMotionMet,
             heartRateMet: finalHeartRateMet,
             interactionMet: finalInteractionMet,
             confirmType: confirmType,
-            confirmHeartRate: confirmHeartRate,
-            rejectionReason: rejectionReason,
+            currentHeartRate: currentHeartRate,
+            currentHeartRateSampleDate: currentHeartRateSampleDate,
+            heartRateTrend: currentHeartRateTrend,
+            breakingContext: breakingContext,
             hasPartialWatch: hasPartialWatch,
             lastWatchWindowId: lastWatchWindowId
         )
@@ -1815,6 +2006,7 @@ final class RouteEEngine: RouteEngine {
                     eventType: "candidateWindowEntered",
                     payload: [
                         "time": ISO8601DateFormatter.cached.string(from: candidateTime),
+                        "candidateAt": result.candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "wristMotionMet": String(result.watchMotionMet),
                         "heartRateMet": String(result.heartRateMet),
                         "interactionMet": String(result.interactionMet)
@@ -1832,9 +2024,11 @@ final class RouteEEngine: RouteEngine {
                     eventType: "confirmedSleep",
                     payload: [
                         "predictedTime": ISO8601DateFormatter.cached.string(from: predictedTime),
+                        "candidateAt": result.candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                        "confirmedAt": result.confirmedAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "method": "watchFusion",
                         "confirmType": result.confirmType ?? "unknown",
-                        "heartRateAtConfirm": result.confirmHeartRate?.formatted3 ?? "nil"
+                        "heartRateAtConfirm": result.currentHeartRate?.formatted3 ?? "nil"
                     ]
                 )
             )
@@ -1843,14 +2037,22 @@ final class RouteEEngine: RouteEngine {
 
         let previousCandidateLike = previousPrediction?.confidence == .candidate || previousPrediction?.confidence == .suspected
         if previousCandidateLike, result.prediction.confidence == .none {
+            let breakingContext = result.breakingContext
             eventBus.post(
                 RouteEvent(
                     routeId: routeId,
                     eventType: "sleepRejected",
                     payload: [
-                        "reason": result.rejectionReason ?? "candidate_reset",
-                        "breakingChannel": rejectionChannel(from: result),
-                        "signal": result.prediction.evidenceSummary
+                        "reason": breakingContext?.reason ?? "candidate_reset",
+                        "breakingChannel": breakingContext?.channel ?? rejectionChannel(from: result),
+                        "signal": breakingContext?.signal ?? result.prediction.evidenceSummary,
+                        "breakingWindowId": breakingContext.map { "\($0.windowId)" } ?? "",
+                        "breakingSourceWatchWindowId": breakingContext?.sourceWatchWindowId.map(String.init) ?? "",
+                        "breakingRMS": breakingContext?.rms?.formatted3 ?? "",
+                        "breakingHeartRate": breakingContext?.heartRate?.formatted3 ?? "",
+                        "breakingHeartRateSampleDate": breakingContext?.heartRateSampleDate.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                        "breakingInteractionState": breakingContext?.interactionState ?? "missing",
+                        "breakingMotionPickup": String(breakingContext?.motionPickupDetected ?? false)
                     ]
                 )
             )
@@ -1866,8 +2068,9 @@ final class RouteEEngine: RouteEngine {
                     payload: [
                         "time": ISO8601DateFormatter.cached.string(from: predictedTime),
                         "channelStatus": channelSummary(from: result),
-                        "heartRate": result.confirmHeartRate?.formatted3 ?? "nil",
-                        "hrTrend": result.heartRateMet ? "met" : "pending"
+                        "heartRate": result.currentHeartRate?.formatted3 ?? "nil",
+                        "heartRateSampleDate": result.currentHeartRateSampleDate.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                        "hrTrend": result.heartRateTrend.rawValue
                     ]
                 )
             )
@@ -1891,9 +2094,9 @@ final class RouteEEngine: RouteEngine {
         let motionAge = evaluationTime.timeIntervalSince(motion.capturedAt)
         guard motionAge <= 120 else { return true }
         let pickupDetected =
-            motion.features.accelRMS > settings.routeBParameters.pickupThreshold ||
-            motion.features.attitudeChangeRate > settings.routeBParameters.attitudeThreshold ||
-            motion.features.peakCount >= settings.routeBParameters.peakCountThreshold
+            motion.features.accelRMS > parameters.iphonePickupThreshold ||
+            motion.features.attitudeChangeRate > parameters.iphoneAttitudeThreshold ||
+            motion.features.peakCount >= parameters.iphonePeakCountThreshold
         return !pickupDetected
     }
 
@@ -1911,18 +2114,8 @@ final class RouteEEngine: RouteEngine {
         return interactionMet ? "unknown" : "iphone_interaction_active"
     }
 
-    private func rejectionChannel(from result: EvaluationResult) -> String {
-        if !result.watchMotionMet {
-            return "watchMotion"
-        }
-        if !result.heartRateMet {
-            return "watchHeartRate"
-        }
-        return "iphoneInteraction"
-    }
-
     private func channelSummary(from result: EvaluationResult) -> String {
-        "watchMotion=\(result.watchMotionMet), heartRate=\(result.heartRateMet), interaction=\(result.interactionMet)"
+        "watchMotion=\(result.watchMotionMet), heartRate=\(result.heartRateMet), interaction=\(result.interactionMet), hrTrend=\(result.heartRateTrend.rawValue)"
     }
 
     private func resolvedSleepTarget(from priors: RoutePriors) -> Double? {
@@ -1943,6 +2136,193 @@ final class RouteEEngine: RouteEngine {
             return max(8, baseline * 0.12)
         }
         return 8
+    }
+
+    private func sourcePriority(_ source: FeatureWindow.Source) -> Int {
+        switch source {
+        case .watch:
+            return 0
+        case .iphone:
+            return 1
+        case .healthKit:
+            return 2
+        }
+    }
+
+    private func freshWatchSnapshot(
+        _ snapshot: WatchSnapshot?,
+        at evaluationTime: Date,
+        freshnessMinutes: Double
+    ) -> WatchSnapshot? {
+        guard let snapshot else { return nil }
+        guard evaluationTime.timeIntervalSince(snapshot.endTime) <= freshnessMinutes * 60 else { return nil }
+        return snapshot
+    }
+
+    private func resolvedHeartRateTrend(
+        samples: [HeartRateSamplePoint],
+        matchedWatch: WatchSnapshot,
+        parameters: RouteEParameters
+    ) -> WatchFeatures.HRTrend {
+        let referenceTime = matchedWatch.features.heartRateSampleDate ?? matchedWatch.endTime
+        let relevantSamples = samples
+            .filter {
+                $0.timestamp <= referenceTime &&
+                $0.timestamp >= referenceTime.addingTimeInterval(-parameters.hrTrendWindowMinutes * 60)
+            }
+            .sorted { $0.timestamp < $1.timestamp }
+
+        guard relevantSamples.count >= parameters.hrTrendMinSamples else {
+            return matchedWatch.features.heartRateTrend
+        }
+
+        let xValues = relevantSamples.map { $0.timestamp.timeIntervalSince(relevantSamples[0].timestamp) / 60 }
+        let yValues = relevantSamples.map(\.bpm)
+        let count = Double(relevantSamples.count)
+        let sumX = xValues.reduce(0, +)
+        let sumY = yValues.reduce(0, +)
+        let sumXY = zip(xValues, yValues).reduce(0) { $0 + ($1.0 * $1.1) }
+        let sumXX = xValues.reduce(0) { $0 + ($1 * $1) }
+        let denominator = count * sumXX - sumX * sumX
+        guard denominator != 0 else { return .insufficient }
+
+        let slope = (count * sumXY - sumX * sumY) / denominator
+        let meanY = sumY / count
+        let intercept = (sumY - slope * sumX) / count
+        let ssTot = yValues.reduce(0) { $0 + pow($1 - meanY, 2) }
+        let ssRes = zip(xValues, yValues).reduce(0) { partial, pair in
+            let predicted = intercept + slope * pair.0
+            return partial + pow(pair.1 - predicted, 2)
+        }
+        let rSquared = ssTot == 0 ? 1 : max(0, 1 - (ssRes / ssTot))
+        let risingThreshold = abs(parameters.hrSlopeThreshold)
+
+        if slope <= parameters.hrSlopeThreshold, rSquared >= 0.2 {
+            return .dropping
+        }
+        if slope >= risingThreshold {
+            return .rising
+        }
+        return .stable
+    }
+
+    private func isHeartRateTrendQualified(
+        trend: WatchFeatures.HRTrend,
+        heartRate: Double?,
+        priors: RoutePriors,
+        hrDropThreshold: Double
+    ) -> Bool {
+        guard
+            let baseline = priors.preSleepHRBaseline ?? priors.sleepHRTarget.map({ $0 / 0.85 }),
+            let heartRate,
+            trend == .dropping
+        else {
+            return false
+        }
+        return baseline - heartRate >= hrDropThreshold * 0.6
+    }
+
+    private func rejectionChannel(
+        watchMotionMet: Bool,
+        heartRateMet: Bool,
+        interactionMet: Bool
+    ) -> String {
+        if !watchMotionMet {
+            return "watchMotion"
+        }
+        if !heartRateMet {
+            return "watchHeartRate"
+        }
+        return interactionMet ? "unknown" : "iphoneInteraction"
+    }
+
+    private func rejectionChannel(from result: EvaluationResult) -> String {
+        rejectionChannel(
+            watchMotionMet: result.watchMotionMet,
+            heartRateMet: result.heartRateMet,
+            interactionMet: result.interactionMet
+        )
+    }
+
+    private func makeBreakingContext(
+        reason: String,
+        channel: String,
+        window: FeatureWindow,
+        matchedWatch: WatchSnapshot?,
+        interaction: InteractionSnapshot?,
+        motion: MotionSnapshot?,
+        evaluationTime: Date
+    ) -> BreakingContext {
+        BreakingContext(
+            reason: reason,
+            channel: channel,
+            signal: breakingSignalSummary(
+                matchedWatch: matchedWatch,
+                interaction: interaction,
+                motion: motion,
+                evaluationTime: evaluationTime
+            ),
+            windowId: window.windowId,
+            sourceWatchWindowId: matchedWatch?.windowId,
+            rms: matchedWatch?.features.wristAccelRMS,
+            heartRate: matchedWatch?.features.heartRate,
+            heartRateSampleDate: matchedWatch?.features.heartRateSampleDate ?? matchedWatch?.endTime,
+            interactionState: interactionStateSummary(
+                at: evaluationTime,
+                interaction: interaction
+            ),
+            motionPickupDetected: motionPickupDetected(
+                motion: motion,
+                parameters: settings.routeEParameters,
+                evaluationTime: evaluationTime
+            )
+        )
+    }
+
+    private func breakingSignalSummary(
+        matchedWatch: WatchSnapshot?,
+        interaction: InteractionSnapshot?,
+        motion: MotionSnapshot?,
+        evaluationTime: Date
+    ) -> String {
+        let watchSummary: String
+        if let matchedWatch {
+            watchSummary = "watchRMS=\(matchedWatch.features.wristAccelRMS.formatted3), watchHR=\(matchedWatch.features.heartRate?.formatted3 ?? "nil")"
+        } else {
+            watchSummary = "watch=missing"
+        }
+
+        let interactionSummary = interactionStateSummary(at: evaluationTime, interaction: interaction)
+        let pickup = motionPickupDetected(
+            motion: motion,
+            parameters: settings.routeEParameters,
+            evaluationTime: evaluationTime
+        )
+        return "\(watchSummary), interaction=\(interactionSummary), motionPickup=\(pickup)"
+    }
+
+    private func interactionStateSummary(
+        at evaluationTime: Date,
+        interaction: InteractionSnapshot?
+    ) -> String {
+        guard let interaction else { return "missing" }
+        let lastInteractionAt = interaction.features.lastInteractionAt ?? interaction.capturedAt
+        let quietSeconds = max(0, evaluationTime.timeIntervalSince(lastInteractionAt))
+        let lockState = interaction.features.isLocked ? "locked" : "unlocked"
+        return "\(lockState), quiet=\(Int(quietSeconds))s, wakes=\(interaction.features.screenWakeCount)"
+    }
+
+    private func motionPickupDetected(
+        motion: MotionSnapshot?,
+        parameters: RouteEParameters,
+        evaluationTime: Date
+    ) -> Bool {
+        guard let motion else { return false }
+        guard evaluationTime.timeIntervalSince(motion.capturedAt) <= 120 else { return false }
+        return
+            motion.features.accelRMS > parameters.iphonePickupThreshold ||
+            motion.features.attitudeChangeRate > parameters.iphoneAttitudeThreshold ||
+            motion.features.peakCount >= parameters.iphonePeakCountThreshold
     }
 
     private func unavailablePrediction(summary: String, updatedAt: Date) -> RoutePrediction {

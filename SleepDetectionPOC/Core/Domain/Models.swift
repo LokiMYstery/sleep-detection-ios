@@ -762,9 +762,28 @@ struct WatchFeatures: Codable, Equatable, Sendable {
     var wristAccelRMS: Double
     var wristStillDuration: TimeInterval
     var heartRate: Double?
+    var heartRateSampleDate: Date?
     var heartRateTrend: HRTrend
     var dataQuality: DataQuality
     var motionSignalVersion: WatchMotionSignalVersion? = nil
+
+    init(
+        wristAccelRMS: Double,
+        wristStillDuration: TimeInterval,
+        heartRate: Double?,
+        heartRateSampleDate: Date? = nil,
+        heartRateTrend: HRTrend,
+        dataQuality: DataQuality,
+        motionSignalVersion: WatchMotionSignalVersion? = nil
+    ) {
+        self.wristAccelRMS = wristAccelRMS
+        self.wristStillDuration = wristStillDuration
+        self.heartRate = heartRate
+        self.heartRateSampleDate = heartRateSampleDate
+        self.heartRateTrend = heartRateTrend
+        self.dataQuality = dataQuality
+        self.motionSignalVersion = motionSignalVersion
+    }
 
     var effectiveMotionSignalVersion: WatchMotionSignalVersion {
         motionSignalVersion ?? .rawMagnitudeV0

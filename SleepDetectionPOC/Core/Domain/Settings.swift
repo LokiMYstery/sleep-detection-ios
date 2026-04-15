@@ -270,12 +270,16 @@ struct RouteEParameters: Codable, Equatable, Sendable {
     var wristStillThreshold: Double
     var wristStillWindowCount: Int
     var wristActiveThreshold: Double
+    var wristActiveResetWindowCount: Int
     var hrConfirmSampleCount: Int
     var hrTrendMinSamples: Int
     var hrTrendWindowMinutes: Double
     var hrSlopeThreshold: Double
     var hrTrendWindowCount: Int
     var interactionQuietThresholdMinutes: Double
+    var iphonePickupThreshold: Double
+    var iphoneAttitudeThreshold: Double
+    var iphonePeakCountThreshold: Int
     var candidateWindowCount: Int
     var confirmWindowCount: Int
     var extendedConfirmWindowCount: Int
@@ -286,18 +290,107 @@ struct RouteEParameters: Codable, Equatable, Sendable {
         wristStillThreshold: 0.015,
         wristStillWindowCount: 2,
         wristActiveThreshold: 0.1,
+        wristActiveResetWindowCount: 2,
         hrConfirmSampleCount: 2,
         hrTrendMinSamples: 3,
         hrTrendWindowMinutes: 20,
         hrSlopeThreshold: -0.3,
         hrTrendWindowCount: 2,
         interactionQuietThresholdMinutes: 5,
+        iphonePickupThreshold: RouteBParameters.default.pickupThreshold,
+        iphoneAttitudeThreshold: RouteBParameters.default.attitudeThreshold,
+        iphonePeakCountThreshold: RouteBParameters.default.peakCountThreshold,
         candidateWindowCount: 2,
         confirmWindowCount: 3,
         extendedConfirmWindowCount: 5,
         watchFreshnessMinutes: 3,
         disconnectGraceMinutes: 5
     )
+
+    private enum CodingKeys: String, CodingKey {
+        case wristStillThreshold
+        case wristStillWindowCount
+        case wristActiveThreshold
+        case wristActiveResetWindowCount
+        case hrConfirmSampleCount
+        case hrTrendMinSamples
+        case hrTrendWindowMinutes
+        case hrSlopeThreshold
+        case hrTrendWindowCount
+        case interactionQuietThresholdMinutes
+        case iphonePickupThreshold
+        case iphoneAttitudeThreshold
+        case iphonePeakCountThreshold
+        case candidateWindowCount
+        case confirmWindowCount
+        case extendedConfirmWindowCount
+        case watchFreshnessMinutes
+        case disconnectGraceMinutes
+    }
+
+    init(
+        wristStillThreshold: Double,
+        wristStillWindowCount: Int,
+        wristActiveThreshold: Double,
+        wristActiveResetWindowCount: Int = Self.default.wristActiveResetWindowCount,
+        hrConfirmSampleCount: Int,
+        hrTrendMinSamples: Int,
+        hrTrendWindowMinutes: Double,
+        hrSlopeThreshold: Double,
+        hrTrendWindowCount: Int,
+        interactionQuietThresholdMinutes: Double,
+        iphonePickupThreshold: Double = Self.default.iphonePickupThreshold,
+        iphoneAttitudeThreshold: Double = Self.default.iphoneAttitudeThreshold,
+        iphonePeakCountThreshold: Int = Self.default.iphonePeakCountThreshold,
+        candidateWindowCount: Int,
+        confirmWindowCount: Int,
+        extendedConfirmWindowCount: Int,
+        watchFreshnessMinutes: Double,
+        disconnectGraceMinutes: Double
+    ) {
+        self.wristStillThreshold = wristStillThreshold
+        self.wristStillWindowCount = wristStillWindowCount
+        self.wristActiveThreshold = wristActiveThreshold
+        self.wristActiveResetWindowCount = wristActiveResetWindowCount
+        self.hrConfirmSampleCount = hrConfirmSampleCount
+        self.hrTrendMinSamples = hrTrendMinSamples
+        self.hrTrendWindowMinutes = hrTrendWindowMinutes
+        self.hrSlopeThreshold = hrSlopeThreshold
+        self.hrTrendWindowCount = hrTrendWindowCount
+        self.interactionQuietThresholdMinutes = interactionQuietThresholdMinutes
+        self.iphonePickupThreshold = iphonePickupThreshold
+        self.iphoneAttitudeThreshold = iphoneAttitudeThreshold
+        self.iphonePeakCountThreshold = iphonePeakCountThreshold
+        self.candidateWindowCount = candidateWindowCount
+        self.confirmWindowCount = confirmWindowCount
+        self.extendedConfirmWindowCount = extendedConfirmWindowCount
+        self.watchFreshnessMinutes = watchFreshnessMinutes
+        self.disconnectGraceMinutes = disconnectGraceMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            wristStillThreshold: try container.decodeIfPresent(Double.self, forKey: .wristStillThreshold) ?? Self.default.wristStillThreshold,
+            wristStillWindowCount: try container.decodeIfPresent(Int.self, forKey: .wristStillWindowCount) ?? Self.default.wristStillWindowCount,
+            wristActiveThreshold: try container.decodeIfPresent(Double.self, forKey: .wristActiveThreshold) ?? Self.default.wristActiveThreshold,
+            wristActiveResetWindowCount: try container.decodeIfPresent(Int.self, forKey: .wristActiveResetWindowCount) ?? Self.default.wristActiveResetWindowCount,
+            hrConfirmSampleCount: try container.decodeIfPresent(Int.self, forKey: .hrConfirmSampleCount) ?? Self.default.hrConfirmSampleCount,
+            hrTrendMinSamples: try container.decodeIfPresent(Int.self, forKey: .hrTrendMinSamples) ?? Self.default.hrTrendMinSamples,
+            hrTrendWindowMinutes: try container.decodeIfPresent(Double.self, forKey: .hrTrendWindowMinutes) ?? Self.default.hrTrendWindowMinutes,
+            hrSlopeThreshold: try container.decodeIfPresent(Double.self, forKey: .hrSlopeThreshold) ?? Self.default.hrSlopeThreshold,
+            hrTrendWindowCount: try container.decodeIfPresent(Int.self, forKey: .hrTrendWindowCount) ?? Self.default.hrTrendWindowCount,
+            interactionQuietThresholdMinutes: try container.decodeIfPresent(Double.self, forKey: .interactionQuietThresholdMinutes) ?? Self.default.interactionQuietThresholdMinutes,
+            iphonePickupThreshold: try container.decodeIfPresent(Double.self, forKey: .iphonePickupThreshold) ?? Self.default.iphonePickupThreshold,
+            iphoneAttitudeThreshold: try container.decodeIfPresent(Double.self, forKey: .iphoneAttitudeThreshold) ?? Self.default.iphoneAttitudeThreshold,
+            iphonePeakCountThreshold: try container.decodeIfPresent(Int.self, forKey: .iphonePeakCountThreshold) ?? Self.default.iphonePeakCountThreshold,
+            candidateWindowCount: try container.decodeIfPresent(Int.self, forKey: .candidateWindowCount) ?? Self.default.candidateWindowCount,
+            confirmWindowCount: try container.decodeIfPresent(Int.self, forKey: .confirmWindowCount) ?? Self.default.confirmWindowCount,
+            extendedConfirmWindowCount: try container.decodeIfPresent(Int.self, forKey: .extendedConfirmWindowCount) ?? Self.default.extendedConfirmWindowCount,
+            watchFreshnessMinutes: try container.decodeIfPresent(Double.self, forKey: .watchFreshnessMinutes) ?? Self.default.watchFreshnessMinutes,
+            disconnectGraceMinutes: try container.decodeIfPresent(Double.self, forKey: .disconnectGraceMinutes) ?? Self.default.disconnectGraceMinutes
+        )
+    }
 }
 
 struct RouteFParameters: Codable, Equatable, Sendable {

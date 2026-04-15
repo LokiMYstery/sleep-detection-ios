@@ -1129,7 +1129,392 @@ struct SleepDetectionPOCTests {
         let prediction = try #require(engine.currentPrediction())
         #expect(prediction.isAvailable == true)
         #expect(prediction.confidence == .confirmed)
-        #expect(prediction.predictedSleepOnset != nil)
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(120))
+        #expect(prediction.candidateAt == start.addingTimeInterval(240))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(360))
+        #expect(prediction.actionReadyAt == start.addingTimeInterval(360))
+        #expect(prediction.supportsImmediateAction == false)
+        #expect(prediction.isLatched)
+    }
+
+    @Test("Route E reuses the freshest watch window for iPhone-side confirmation without Route-B pickup leakage")
+    @MainActor
+    func routeEConfirmsFromFreshWatchOnIPhoneWindow() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeBParameters = RouteBParameters(
+            interactionQuietThresholdMinutes: 2,
+            stillnessThreshold: 0.02,
+            confirmWindowCount: 3,
+            pickupThreshold: 0.001,
+            attitudeThreshold: 0.1,
+            peakCountThreshold: 1
+        )
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            wristActiveResetWindowCount: 2,
+            hrConfirmSampleCount: 1,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            iphonePickupThreshold: 0.2,
+            iphoneAttitudeThreshold: 10,
+            iphonePeakCountThreshold: 3,
+            candidateWindowCount: 1,
+            confirmWindowCount: 1,
+            extendedConfirmWindowCount: 3,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let bus = EventBus()
+        let engine = RouteEEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P1,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: 70,
+                sleepHRTarget: 60,
+                hrDropThreshold: 8
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start.addingTimeInterval(120),
+                endTime: start.addingTimeInterval(150),
+                duration: 30,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.01,
+                    wristStillDuration: 90,
+                    heartRate: 58,
+                    heartRateSampleDate: start.addingTimeInterval(145),
+                    heartRateTrend: .dropping,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        )
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate)
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(120))
+        #expect(prediction.candidateAt == start.addingTimeInterval(150))
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 1,
+                startTime: start.addingTimeInterval(160),
+                endTime: start.addingTimeInterval(190),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(
+                    accelRMS: 0.05,
+                    peakCount: 1,
+                    attitudeChangeRate: 5,
+                    maxAccel: 0.07,
+                    stillRatio: 0.95,
+                    stillDuration: 29
+                ),
+                audio: nil,
+                interaction: InteractionFeatures(
+                    isLocked: true,
+                    timeSinceLastInteraction: 300,
+                    screenWakeCount: 0,
+                    lastInteractionAt: start.addingTimeInterval(-110)
+                ),
+                watch: nil
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(120))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(190))
+        #expect(prediction.actionReadyAt == start.addingTimeInterval(190))
+        #expect(bus.recentEvents.filter { $0.routeId == .E && $0.eventType == "confirmedSleep" }.count == 1)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 2,
+                startTime: start.addingTimeInterval(190),
+                endTime: start.addingTimeInterval(220),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(
+                    accelRMS: 0.05,
+                    peakCount: 1,
+                    attitudeChangeRate: 5,
+                    maxAccel: 0.07,
+                    stillRatio: 0.95,
+                    stillDuration: 29
+                ),
+                audio: nil,
+                interaction: InteractionFeatures(
+                    isLocked: true,
+                    timeSinceLastInteraction: 330,
+                    screenWakeCount: 0,
+                    lastInteractionAt: start.addingTimeInterval(-110)
+                ),
+                watch: nil
+            )
+        )
+
+        #expect(bus.recentEvents.filter { $0.routeId == .E && $0.eventType == "confirmedSleep" }.count == 1)
+    }
+
+    @Test("Route E rejects stale iPhone-side reuse once the freshest watch window expires")
+    @MainActor
+    func routeERejectsStaleWatchReuse() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            wristActiveResetWindowCount: 2,
+            hrConfirmSampleCount: 1,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 2,
+            extendedConfirmWindowCount: 4,
+            watchFreshnessMinutes: 0.5,
+            disconnectGraceMinutes: 5
+        )
+
+        let bus = EventBus()
+        let engine = RouteEEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P1,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: 70,
+                sleepHRTarget: 60,
+                hrDropThreshold: 8
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.01,
+                    wristStillDuration: 60,
+                    heartRate: 58,
+                    heartRateSampleDate: start.addingTimeInterval(25),
+                    heartRateTrend: .dropping,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        )
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 1,
+                startTime: start.addingTimeInterval(60),
+                endTime: start.addingTimeInterval(90),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(
+                    accelRMS: 0.01,
+                    peakCount: 0,
+                    attitudeChangeRate: 1,
+                    maxAccel: 0.02,
+                    stillRatio: 0.98,
+                    stillDuration: 30
+                ),
+                audio: nil,
+                interaction: InteractionFeatures(
+                    isLocked: true,
+                    timeSinceLastInteraction: 240,
+                    screenWakeCount: 0,
+                    lastInteractionAt: start.addingTimeInterval(-150)
+                ),
+                watch: nil
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .none)
+        let rejection = try #require(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "sleepRejected" })
+        #expect(rejection.payload["reason"] == "watch_data_stale")
+        #expect(rejection.payload["breakingSourceWatchWindowId"] == "0")
+        #expect(rejection.payload["breakingWindowId"] == "1")
+    }
+
+    @Test("Route E softens a single wrist-active window and rejects on repeated wrist activity")
+    @MainActor
+    func routeESoftensSingleWristActiveWindow() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            wristActiveResetWindowCount: 2,
+            hrConfirmSampleCount: 1,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 3,
+            extendedConfirmWindowCount: 5,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let bus = EventBus()
+        let engine = RouteEEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P1,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: 70,
+                sleepHRTarget: 60,
+                hrDropThreshold: 8
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.01,
+                    wristStillDuration: 60,
+                    heartRate: 58,
+                    heartRateSampleDate: start.addingTimeInterval(25),
+                    heartRateTrend: .dropping,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        )
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 1,
+                startTime: start.addingTimeInterval(30),
+                endTime: start.addingTimeInterval(60),
+                duration: 30,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.22,
+                    wristStillDuration: 0,
+                    heartRate: 59,
+                    heartRateSampleDate: start.addingTimeInterval(55),
+                    heartRateTrend: .stable,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate)
+        #expect(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "sleepRejected" } == nil)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 2,
+                startTime: start.addingTimeInterval(60),
+                endTime: start.addingTimeInterval(90),
+                duration: 30,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.25,
+                    wristStillDuration: 0,
+                    heartRate: 60,
+                    heartRateSampleDate: start.addingTimeInterval(85),
+                    heartRateTrend: .stable,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .none)
+        let rejection = try #require(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "sleepRejected" })
+        #expect(rejection.payload["reason"] == "wrist_active")
+        #expect(rejection.payload["breakingWindowId"] == "2")
+        #expect(rejection.payload["breakingSourceWatchWindowId"] == "2")
+        #expect(rejection.payload["breakingRMS"] == "0.250")
+        #expect(rejection.payload["breakingHeartRate"] == "60.000")
+        #expect(rejection.payload["breakingHeartRateSampleDate"] == ISO8601DateFormatter.cached.string(from: start.addingTimeInterval(85)))
+        #expect(rejection.payload["breakingInteractionState"] == "missing")
+        #expect(rejection.payload["breakingMotionPickup"] == "false")
     }
 
     @Test("Route E stays unavailable without a paired watch")
@@ -1606,6 +1991,7 @@ struct SleepDetectionPOCTests {
         #expect(mirroredWindows.count == 1)
         #expect(mirroredWindows.first?.source == .watch)
         #expect(mirroredWindows.first?.watch?.heartRate == 60)
+        #expect(mirroredWindows.first?.watch?.heartRateSampleDate == start.addingTimeInterval(110))
         #expect(mirroredWindows.first?.watch?.heartRateTrend == .dropping)
         #expect(mirroredWindows.first?.watch?.motionSignalVersion == .dynamicAccelerationV1)
 
