@@ -2079,7 +2079,11 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         let confidence: Double
         let periodicityScore: Double
         let rateEstimate: Double?
+        let rawRateEstimate: Double?
         let intervalCV: Double?
+        let bestCorrelation: Double
+        let prePenaltyConfidence: Double
+        let suppressionReason: String?
     }
 
     private struct SnoreEstimate: Sendable {
@@ -2454,12 +2458,16 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                 envNoiseLevel: meanRMS,
                 envNoiseVariance: variance,
                 breathingRateEstimate: breathingEstimate.rateEstimate,
+                breathingRateEstimateRaw: breathingEstimate.rawRateEstimate,
                 frictionEventCount: frictionEvents,
                 isSilent: isSilent,
                 breathingPresent: breathingEstimate.present,
                 breathingConfidence: breathingEstimate.confidence,
                 breathingPeriodicityScore: breathingEstimate.periodicityScore,
                 breathingIntervalCV: breathingEstimate.intervalCV,
+                breathingBestCorrelation: breathingEstimate.bestCorrelation,
+                breathingPrePenaltyConfidence: breathingEstimate.prePenaltyConfidence,
+                breathingSuppressionReason: breathingEstimate.suppressionReason,
                 disturbanceScore: disturbanceScore,
                 playbackLeakageScore: playbackLeakageScore,
                 snoreCandidateCount: snoreEstimate.candidateCount,
@@ -2694,13 +2702,31 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         playbackLeakageScore: Double,
         meanLowBandRatio: Double
     ) -> BreathingEstimate {
-        guard fallbackDuration >= 20, frames.count >= 20, !isSilent else {
+        guard fallbackDuration >= 20 else {
             return BreathingEstimate(
                 present: false,
                 confidence: 0,
                 periodicityScore: 0,
                 rateEstimate: nil,
-                intervalCV: nil
+                rawRateEstimate: nil,
+                intervalCV: nil,
+                bestCorrelation: 0,
+                prePenaltyConfidence: 0,
+                suppressionReason: "durationGate"
+            )
+        }
+
+        guard frames.count >= 20 else {
+            return BreathingEstimate(
+                present: false,
+                confidence: 0,
+                periodicityScore: 0,
+                rateEstimate: nil,
+                rawRateEstimate: nil,
+                intervalCV: nil,
+                bestCorrelation: 0,
+                prePenaltyConfidence: 0,
+                suppressionReason: "frameGate"
             )
         }
 
@@ -2716,7 +2742,11 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
                 confidence: 0,
                 periodicityScore: 0,
                 rateEstimate: nil,
-                intervalCV: nil
+                rawRateEstimate: nil,
+                intervalCV: nil,
+                bestCorrelation: 0,
+                prePenaltyConfidence: 0,
+                suppressionReason: isSilent ? "silentLowEnergy" : "flatSignal"
             )
         }
 
@@ -2748,7 +2778,8 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
         let stability = intervalCV.map { clamp(1 - ($0 / 0.6)) } ?? 0.25
         let lowBandSupport = clamp((meanLowBandRatio - 0.30) / 0.40)
-        var confidence = clamp(bestCorrelation * 0.55 + stability * 0.25 + lowBandSupport * 0.20)
+        let prePenaltyConfidence = clamp(bestCorrelation * 0.55 + stability * 0.25 + lowBandSupport * 0.20)
+        var confidence = prePenaltyConfidence
         confidence *= (1 - disturbanceScore * 0.55)
         confidence *= (1 - playbackLeakageScore * 0.75)
         let present =
@@ -2762,7 +2793,11 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             confidence: confidence,
             periodicityScore: clamp(bestCorrelation),
             rateEstimate: present ? estimatedRate : nil,
-            intervalCV: intervalCV
+            rawRateEstimate: estimatedRate,
+            intervalCV: intervalCV,
+            bestCorrelation: bestCorrelation,
+            prePenaltyConfidence: prePenaltyConfidence,
+            suppressionReason: present ? nil : "thresholdFail"
         )
     }
 

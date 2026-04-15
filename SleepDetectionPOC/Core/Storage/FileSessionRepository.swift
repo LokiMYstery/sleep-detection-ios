@@ -6,6 +6,7 @@ protocol SessionRepository: Sendable {
     func appendWindow(_ window: FeatureWindow, to sessionId: UUID) async throws
     func appendEvent(_ event: RouteEvent, to sessionId: UUID) async throws
     func savePredictions(_ predictions: [RoutePrediction], for sessionId: UUID) async throws
+    func saveTimeline(_ timeline: SleepTimeline, for sessionId: UUID) async throws
     func saveTruth(_ truth: TruthRecord, for sessionId: UUID) async throws
     func loadBundles() async throws -> [SessionBundle]
     func loadBundle(sessionId: UUID) async throws -> SessionBundle?
@@ -60,6 +61,14 @@ actor FileSessionRepository: SessionRepository {
         )
     }
 
+    func saveTimeline(_ timeline: SleepTimeline, for sessionId: UUID) async throws {
+        try ensureSessionDirectory(sessionId)
+        try writeJSON(
+            timeline,
+            to: sessionURL(for: sessionId, fileName: "timeline.json")
+        )
+    }
+
     func saveTruth(_ truth: TruthRecord, for sessionId: UUID) async throws {
         try ensureSessionDirectory(sessionId)
         try writeJSON(truth, to: sessionURL(for: sessionId, fileName: "truth.json"))
@@ -80,12 +89,14 @@ actor FileSessionRepository: SessionRepository {
             let events = try readJSONLines(RouteEvent.self, from: directory.appendingPathComponent("events.jsonl"))
             let predictions = try readPredictions(from: directory.appendingPathComponent("predictions.json"))
             let truth = try readTruth(from: directory.appendingPathComponent("truth.json"))
+            let timeline = try readTimeline(from: directory.appendingPathComponent("timeline.json"))
             return SessionBundle(
                 session: session,
                 windows: windows,
                 events: events,
                 predictions: predictions,
-                truth: truth
+                truth: truth,
+                timeline: timeline
             )
         }
         .sorted { $0.session.startTime > $1.session.startTime }
@@ -100,7 +111,8 @@ actor FileSessionRepository: SessionRepository {
         let events = try readJSONLines(RouteEvent.self, from: directory.appendingPathComponent("events.jsonl"))
         let predictions = try readPredictions(from: directory.appendingPathComponent("predictions.json"))
         let truth = try readTruth(from: directory.appendingPathComponent("truth.json"))
-        return SessionBundle(session: session, windows: windows, events: events, predictions: predictions, truth: truth)
+        let timeline = try readTimeline(from: directory.appendingPathComponent("timeline.json"))
+        return SessionBundle(session: session, windows: windows, events: events, predictions: predictions, truth: truth, timeline: timeline)
     }
 
     func loadWindows(sessionId: UUID) async throws -> [FeatureWindow] {
@@ -134,6 +146,11 @@ actor FileSessionRepository: SessionRepository {
     private func readTruth(from url: URL) throws -> TruthRecord? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try readJSON(TruthRecord.self, from: url)
+    }
+
+    private func readTimeline(from url: URL) throws -> SleepTimeline? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try readJSON(SleepTimeline.self, from: url)
     }
 
     private func ensureBaseDirectory() throws {

@@ -537,6 +537,131 @@ struct SleepDetectionPOCTests {
         #expect(prediction.evidenceSummary.contains("Confirmed"))
     }
 
+    @Test("Route D emits a single confirmed event and wakes only after two failed windows")
+    @MainActor
+    func routeDLatchesAndEndsAfterTwoFailures() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeDParameters = RouteDParameters(
+            motionStillnessThreshold: 0.015,
+            audioQuietThreshold: 0.02,
+            audioVarianceThreshold: 0.0004,
+            frictionEventThreshold: 1,
+            breathingMinPeriodicityScore: 0.43,
+            breathingMaxIntervalCV: 0.4,
+            playbackLeakageRejectThreshold: 0.68,
+            disturbanceRejectThreshold: 0.62,
+            snoreCandidateMinConfidence: 0.58,
+            snoreBoostWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 2
+        )
+
+        let bus = EventBus()
+        let engine = RouteDEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: true, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(session: session, priors: PriorSnapshot.empty.routePriors)
+
+        let motion = MotionFeatures(
+            accelRMS: 0.009,
+            peakCount: 0,
+            attitudeChangeRate: 1,
+            maxAccel: 0.012,
+            stillRatio: 0.94,
+            stillDuration: 28
+        )
+        let quietAudio = AudioFeatures(
+            envNoiseLevel: 0.01,
+            envNoiseVariance: 0.0001,
+            breathingRateEstimate: nil,
+            frictionEventCount: 0,
+            isSilent: true
+        )
+        let interaction = InteractionFeatures(
+            isLocked: true,
+            timeSinceLastInteraction: 180,
+            screenWakeCount: 0,
+            lastInteractionAt: start.addingTimeInterval(-180)
+        )
+
+        for index in 0..<3 {
+            engine.onWindow(
+                FeatureWindow(
+                    windowId: index,
+                    startTime: start.addingTimeInterval(Double(index) * 30),
+                    endTime: start.addingTimeInterval(Double(index + 1) * 30),
+                    duration: 30,
+                    source: .iphone,
+                    motion: motion,
+                    audio: quietAudio,
+                    interaction: interaction,
+                    watch: nil
+                )
+            )
+        }
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset == start)
+        #expect(prediction.candidateAt == start.addingTimeInterval(30))
+        #expect(prediction.actionReadyAt == start.addingTimeInterval(60))
+        #expect(prediction.supportsImmediateAction)
+        #expect(prediction.isLatched)
+        #expect(bus.recentEvents.filter { $0.routeId == .D && $0.eventType == "confirmedSleep" }.count == 1)
+
+        let activeMotion = MotionFeatures(
+            accelRMS: 0.08,
+            peakCount: 4,
+            attitudeChangeRate: 12,
+            maxAccel: 0.11,
+            stillRatio: 0.30,
+            stillDuration: 2
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 3,
+                startTime: start.addingTimeInterval(90),
+                endTime: start.addingTimeInterval(120),
+                duration: 30,
+                source: .iphone,
+                motion: activeMotion,
+                audio: quietAudio,
+                interaction: interaction,
+                watch: nil
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(bus.recentEvents.filter { $0.routeId == .D && $0.eventType == "wakeDetected" }.isEmpty)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 4,
+                startTime: start.addingTimeInterval(120),
+                endTime: start.addingTimeInterval(150),
+                duration: 30,
+                source: .iphone,
+                motion: activeMotion,
+                audio: quietAudio,
+                interaction: interaction,
+                watch: nil
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .none)
+        #expect(bus.recentEvents.filter { $0.routeId == .D && $0.eventType == "wakeDetected" }.count == 1)
+        #expect(bus.recentEvents.filter { $0.routeId == .D && $0.eventType == "confirmedSleep" }.count == 1)
+    }
+
     @Test("Route D confirms from breathing support even when audio is not quiet")
     @MainActor
     func routeDConfirmsFromBreathingSupport() async throws {
@@ -711,9 +836,35 @@ struct SleepDetectionPOCTests {
             )
         )
 
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 2,
+                startTime: start.addingTimeInterval(60),
+                endTime: start.addingTimeInterval(90),
+                duration: 30,
+                source: .iphone,
+                motion: motion,
+                audio: AudioFeatures(
+                    envNoiseLevel: 0.028,
+                    envNoiseVariance: 0.0005,
+                    breathingRateEstimate: 12.0,
+                    frictionEventCount: 0,
+                    isSilent: false,
+                    breathingPresent: true,
+                    breathingConfidence: 0.72,
+                    breathingPeriodicityScore: 0.58,
+                    breathingIntervalCV: 0.22,
+                    disturbanceScore: 0.18,
+                    playbackLeakageScore: 0.92
+                ),
+                interaction: interaction,
+                watch: nil
+            )
+        )
+
         let prediction = try #require(engine.currentPrediction())
         #expect(prediction.confidence == .none)
-        #expect(prediction.evidenceSummary.contains("Waiting for sleep audio evidence"))
+        #expect(prediction.evidenceSummary.contains("Monitoring motion, audio, and interaction"))
         let rejectionEvent = try #require(bus.recentEvents.first(where: { $0.eventType == "sleepRejected" }))
         #expect(rejectionEvent.payload["reason"] == "playback_leakage")
     }
@@ -736,6 +887,10 @@ struct SleepDetectionPOCTests {
         #expect(decoded.envNoiseLevel == 0.014)
         #expect(decoded.breathingPresent == false)
         #expect(decoded.breathingConfidence == 0)
+        #expect(decoded.breathingRateEstimateRaw == nil)
+        #expect(decoded.breathingBestCorrelation == 0)
+        #expect(decoded.breathingPrePenaltyConfidence == 0)
+        #expect(decoded.breathingSuppressionReason == nil)
         #expect(decoded.playbackLeakageScore == 0)
         #expect(decoded.snoreCandidateCount == 0)
     }
@@ -805,8 +960,90 @@ struct SleepDetectionPOCTests {
         let decoded = try JSONDecoder().decode(RoutePrediction.self, from: data)
         #expect(decoded.routeId == .C)
         #expect(decoded.predictedSleepOnset == onset)
+        #expect(decoded.candidateAt == nil)
         #expect(decoded.confirmedAt == nil)
+        #expect(decoded.actionReadyAt == nil)
         #expect(decoded.confidence == .confirmed)
+        #expect(decoded.supportsImmediateAction == false)
+        #expect(decoded.isLatched == false)
+    }
+
+    @Test("SleepTimelineTracker records primary and re-onset episodes")
+    func sleepTimelineTrackerLifecycle() throws {
+        var tracker = SleepTimelineTracker()
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        tracker.startSession(at: start)
+
+        tracker.sync(
+            predictions: [
+                RoutePrediction(
+                    routeId: .D,
+                    predictedSleepOnset: start,
+                    candidateAt: start.addingTimeInterval(30),
+                    confidence: .candidate,
+                    evidenceSummary: "Route D candidate",
+                    lastUpdated: start.addingTimeInterval(30),
+                    isAvailable: true,
+                    supportsImmediateAction: true
+                )
+            ],
+            updatedAt: start.addingTimeInterval(30)
+        )
+
+        var timeline = try #require(tracker.timeline)
+        #expect(timeline.episodes.count == 1)
+        #expect(timeline.episodes[0].kind == .primary)
+        #expect(timeline.latestNightState == .candidate)
+
+        tracker.sync(
+            predictions: [
+                RoutePrediction(
+                    routeId: .D,
+                    predictedSleepOnset: start,
+                    candidateAt: start.addingTimeInterval(30),
+                    confirmedAt: start.addingTimeInterval(60),
+                    actionReadyAt: start.addingTimeInterval(60),
+                    confidence: .confirmed,
+                    evidenceSummary: "Route D confirmed",
+                    lastUpdated: start.addingTimeInterval(60),
+                    isAvailable: true,
+                    supportsImmediateAction: true,
+                    isLatched: true
+                )
+            ],
+            updatedAt: start.addingTimeInterval(60)
+        )
+
+        timeline = try #require(tracker.timeline)
+        #expect(timeline.primaryEpisodeIndex == 0)
+        #expect(timeline.primaryActionReadyAt == start.addingTimeInterval(60))
+        #expect(timeline.episodes[0].state == .actionReady)
+
+        tracker.sync(predictions: [], updatedAt: start.addingTimeInterval(90))
+        timeline = try #require(tracker.timeline)
+        #expect(timeline.episodes[0].state == .ended)
+        #expect(timeline.episodes[0].wakeDetectedAt == start.addingTimeInterval(90))
+
+        tracker.sync(
+            predictions: [
+                RoutePrediction(
+                    routeId: .D,
+                    predictedSleepOnset: start.addingTimeInterval(120),
+                    candidateAt: start.addingTimeInterval(150),
+                    confidence: .candidate,
+                    evidenceSummary: "Route D re-onset candidate",
+                    lastUpdated: start.addingTimeInterval(150),
+                    isAvailable: true,
+                    supportsImmediateAction: true
+                )
+            ],
+            updatedAt: start.addingTimeInterval(150)
+        )
+
+        timeline = try #require(tracker.timeline)
+        #expect(timeline.episodes.count == 2)
+        #expect(timeline.episodes[1].kind == .reOnset)
+        #expect(timeline.episodes[1].state == .candidate)
     }
 
     @Test("Route E confirms from Watch wrist motion and heart rate windows")
@@ -2193,6 +2430,61 @@ struct SleepDetectionPOCTests {
 
         let windows = try await repository.loadWindows(sessionId: session.sessionId)
         #expect(windows.count == 1)
+    }
+
+    @Test("Repository persists timelines alongside bundles")
+    func repositoryPersistsTimeline() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        let session = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_712_665_200),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: true, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        try await repository.createSession(session)
+
+        let timeline = SleepTimeline(
+            primaryEpisodeIndex: 0,
+            primaryActionReadyAt: session.startTime.addingTimeInterval(60),
+            primaryOnsetEstimate: session.startTime,
+            actionTakenAt: nil,
+            actionStatus: .notTriggered,
+            latestNightState: .actionReady,
+            episodes: [
+                SleepEpisode(
+                    episodeIndex: 0,
+                    kind: .primary,
+                    candidateAt: session.startTime.addingTimeInterval(30),
+                    actionReadyAt: session.startTime.addingTimeInterval(60),
+                    onsetEstimate: session.startTime,
+                    wakeDetectedAt: nil,
+                    endedAt: nil,
+                    state: .actionReady,
+                    actionEligibility: .eligible,
+                    routeEvidence: [
+                        RouteEpisodeEvidence(
+                            routeId: .D,
+                            candidateAt: session.startTime.addingTimeInterval(30),
+                            actionReadyAt: session.startTime.addingTimeInterval(60),
+                            onsetEstimate: session.startTime,
+                            confidence: .confirmed,
+                            confirmType: nil,
+                            evidenceSummary: "Route D confirmed",
+                            isBackfilled: true,
+                            supportsImmediateAction: true,
+                            isLatched: true
+                        )
+                    ]
+                )
+            ],
+            actionDecisions: [],
+            lastUpdated: session.startTime.addingTimeInterval(60)
+        )
+
+        try await repository.saveTimeline(timeline, for: session.sessionId)
+        let loaded = try await repository.loadBundle(sessionId: session.sessionId)
+        #expect(loaded?.timeline == timeline)
     }
 
     @Test("Route F confirms from passive HealthKit HR and HRV samples")

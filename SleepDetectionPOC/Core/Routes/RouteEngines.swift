@@ -118,7 +118,8 @@ enum RouteCState: String {
 enum RouteDState: String {
     case monitoring
     case candidate
-    case confirmed
+    case actionReady
+    case latched
 }
 
 enum RouteEState: String {
@@ -863,7 +864,10 @@ final class RouteDEngine: RouteEngine {
     private var prediction: RoutePrediction?
     private var state: RouteDState = .monitoring
     private var consecutiveFusionWindows = 0
-    private var candidateStartTime: Date?
+    private var consecutiveFailureWindows = 0
+    private var runStartTime: Date?
+    private var candidateAt: Date?
+    private var actionReadyAt: Date?
 
     init(settings: ExperimentSettings, eventBus: EventBus = .shared) {
         self.settings = settings
@@ -877,8 +881,7 @@ final class RouteDEngine: RouteEngine {
     func start(session: Session, priors: RoutePriors) {
         self.session = session
         state = .monitoring
-        consecutiveFusionWindows = 0
-        candidateStartTime = nil
+        resetEpisodeTracking()
 
         if settings.disableMicrophoneFeatures {
             prediction = unavailablePrediction(
@@ -913,22 +916,7 @@ final class RouteDEngine: RouteEngine {
         guard let motion = window.motion, let interaction = window.interaction else { return }
 
         guard let audio = window.audio else {
-            consecutiveFusionWindows = 0
-            candidateStartTime = nil
-            state = .monitoring
-            prediction = unavailablePrediction(
-                summary: "Audio missing in current window",
-                updatedAt: window.endTime
-            )
-            eventBus.post(
-                RouteEvent(
-                    routeId: routeId,
-                    eventType: "audioMissing",
-                    payload: [
-                        "windowId": "\(window.windowId)"
-                    ]
-                )
-            )
+            handleMissingAudio(window: window, motion: motion, interaction: interaction)
             return
         }
 
@@ -965,42 +953,20 @@ final class RouteDEngine: RouteEngine {
             audio.frictionEventCount > max(parameters.frictionEventThreshold * 2, 2)
         let audioSupportsSleep = quietAudio || breathingSupport || snoreSupport
 
-        if !(quietInteraction && stillMotion && audioSupportsSleep) || audioDisturbance {
-            if state == .candidate {
-                eventBus.post(
-                    RouteEvent(
-                        routeId: routeId,
-                        eventType: "sleepRejected",
-                        payload: [
-                            "reason": rejectionReason(
-                                quietInteraction: quietInteraction,
-                                stillMotion: stillMotion,
-                                quietAudio: quietAudio,
-                                breathingSupport: breathingSupport,
-                                snoreSupport: snoreSupport,
-                                audioDisturbance: audioDisturbance,
-                                playbackPolluted: playbackPolluted
-                            )
-                        ]
-                    )
-                )
-            }
-            consecutiveFusionWindows = 0
-            candidateStartTime = nil
-            state = .monitoring
-            prediction = RoutePrediction(
-                routeId: routeId,
-                predictedSleepOnset: nil,
-                confidence: .none,
-                evidenceSummary: monitoringSummary(
-                    motion: motion,
-                    audio: audio,
-                    interaction: interaction,
-                    breathingSupport: breathingSupport,
-                    snoreSupport: snoreSupport
-                ),
-                lastUpdated: window.endTime,
-                isAvailable: true
+        let fusionSatisfied = quietInteraction && stillMotion && audioSupportsSleep && !audioDisturbance
+        if !fusionSatisfied {
+            handleFailedFusion(
+                window: window,
+                motion: motion,
+                audio: audio,
+                interaction: interaction,
+                quietInteraction: quietInteraction,
+                stillMotion: stillMotion,
+                quietAudio: quietAudio,
+                breathingSupport: breathingSupport,
+                snoreSupport: snoreSupport,
+                audioDisturbance: audioDisturbance,
+                playbackPolluted: playbackPolluted
             )
             return
         }
@@ -1016,32 +982,70 @@ final class RouteDEngine: RouteEngine {
             )
         }
 
+        consecutiveFailureWindows = 0
         let windowIncrement = 1 + (snoreSupport ? max(parameters.snoreBoostWindowCount, 0) : 0)
         consecutiveFusionWindows += windowIncrement
-        if candidateStartTime == nil {
-            candidateStartTime = interaction.lastInteractionAt ?? window.startTime
+        if runStartTime == nil {
+            runStartTime = window.startTime
         }
 
-        if consecutiveFusionWindows >= parameters.confirmWindowCount {
-            state = .confirmed
-            let predictedTime = candidateStartTime ?? window.startTime
-            prediction = RoutePrediction(
-                routeId: routeId,
-                predictedSleepOnset: predictedTime,
-                confidence: .confirmed,
-                evidenceSummary: "Confirmed using motion + audio + interaction from \(predictedTime.formattedTime) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
-                lastUpdated: window.endTime,
-                isAvailable: true
+        let onsetEstimate = runStartTime ?? window.startTime
+        if candidateAt == nil, consecutiveFusionWindows >= parameters.candidateWindowCount {
+            candidateAt = window.endTime
+            state = .candidate
+            prediction = episodePrediction(
+                onsetEstimate: onsetEstimate,
+                candidateAt: candidateAt,
+                actionReadyAt: actionReadyAt,
+                confidence: .candidate,
+                updatedAt: window.endTime,
+                summary: "Candidate entered with \(consecutiveFusionWindows)/\(parameters.confirmWindowCount) fusion windows · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))"
             )
             eventBus.post(
                 RouteEvent(
+                    timestamp: window.endTime,
+                    routeId: routeId,
+                    eventType: "candidateWindowEntered",
+                    payload: [
+                        "candidateTime": ISO8601DateFormatter.cached.string(from: onsetEstimate),
+                        "candidateAt": candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                        "fusionWindows": "\(consecutiveFusionWindows)",
+                        "noise": String(format: "%.3f", audio.envNoiseLevel),
+                        "breathingRate": (audio.breathingRateEstimate ?? audio.breathingRateEstimateRaw).map { String(format: "%.1f", $0) } ?? "none",
+                        "snoreCount": "\(audio.snoreCandidateCount)"
+                    ]
+                )
+            )
+        }
+
+        if actionReadyAt == nil, consecutiveFusionWindows >= parameters.confirmWindowCount {
+            actionReadyAt = window.endTime
+            state = .actionReady
+            prediction = RoutePrediction(
+                routeId: routeId,
+                predictedSleepOnset: onsetEstimate,
+                candidateAt: candidateAt,
+                confirmedAt: actionReadyAt,
+                actionReadyAt: actionReadyAt,
+                confidence: .confirmed,
+                evidenceSummary: "Confirmed using motion + audio + interaction from \(onsetEstimate.formattedTime) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
+                lastUpdated: window.endTime,
+                isAvailable: true,
+                supportsImmediateAction: true,
+                isLatched: true
+            )
+            eventBus.post(
+                RouteEvent(
+                    timestamp: window.endTime,
                     routeId: routeId,
                     eventType: "confirmedSleep",
                     payload: [
-                        "predictedTime": ISO8601DateFormatter.cached.string(from: predictedTime),
+                        "predictedTime": ISO8601DateFormatter.cached.string(from: onsetEstimate),
+                        "confirmedAt": actionReadyAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                        "actionReadyAt": actionReadyAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "method": "multimodalFusion",
                         "fusionWindows": "\(consecutiveFusionWindows)",
-                        "breathingRate": audio.breathingRateEstimate.map { String(format: "%.1f", $0) } ?? "none",
+                        "breathingRate": (audio.breathingRateEstimate ?? audio.breathingRateEstimateRaw).map { String(format: "%.1f", $0) } ?? "none",
                         "snoreCount": "\(audio.snoreCandidateCount)"
                     ]
                 )
@@ -1049,31 +1053,29 @@ final class RouteDEngine: RouteEngine {
             return
         }
 
-        if consecutiveFusionWindows >= parameters.candidateWindowCount {
-            let predictedTime = candidateStartTime ?? window.startTime
-            let confidence: SleepConfidence = consecutiveFusionWindows == parameters.candidateWindowCount ? .candidate : .suspected
-            let eventType = consecutiveFusionWindows == parameters.candidateWindowCount ? "candidateWindowEntered" : "suspectedSleep"
-            state = .candidate
-            prediction = RoutePrediction(
-                routeId: routeId,
-                predictedSleepOnset: predictedTime,
-                confidence: confidence,
-                evidenceSummary: "Fusion support \(consecutiveFusionWindows)/\(parameters.confirmWindowCount) windows · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
-                lastUpdated: window.endTime,
-                isAvailable: true
+        if actionReadyAt != nil {
+            state = .latched
+            prediction = episodePrediction(
+                onsetEstimate: onsetEstimate,
+                candidateAt: candidateAt,
+                actionReadyAt: actionReadyAt,
+                confidence: .confirmed,
+                updatedAt: window.endTime,
+                summary: "Latched Route D episode from \(onsetEstimate.formattedTime) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))"
             )
-            eventBus.post(
-                RouteEvent(
-                    routeId: routeId,
-                    eventType: eventType,
-                    payload: [
-                        "candidateTime": ISO8601DateFormatter.cached.string(from: predictedTime),
-                        "fusionWindows": "\(consecutiveFusionWindows)",
-                        "noise": String(format: "%.3f", audio.envNoiseLevel),
-                        "breathingRate": audio.breathingRateEstimate.map { String(format: "%.1f", $0) } ?? "none",
-                        "snoreCount": "\(audio.snoreCandidateCount)"
-                    ]
-                )
+            return
+        }
+
+        if candidateAt != nil {
+            state = .candidate
+            let confidence: SleepConfidence = consecutiveFusionWindows == parameters.candidateWindowCount ? .candidate : .suspected
+            prediction = episodePrediction(
+                onsetEstimate: onsetEstimate,
+                candidateAt: candidateAt,
+                actionReadyAt: nil,
+                confidence: confidence,
+                updatedAt: window.endTime,
+                summary: "Fusion support \(consecutiveFusionWindows)/\(parameters.confirmWindowCount) windows · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))"
             )
             return
         }
@@ -1094,6 +1096,178 @@ final class RouteDEngine: RouteEngine {
 
     func stop() {}
 
+    private func handleMissingAudio(
+        window: FeatureWindow,
+        motion: MotionFeatures,
+        interaction: InteractionFeatures
+    ) {
+        if candidateAt != nil || actionReadyAt != nil {
+            handleEpisodeFailure(
+                window: window,
+                motion: motion,
+                interaction: interaction,
+                summary: "Audio missing while preserving latched Route D episode",
+                reason: "audio_missing"
+            )
+            return
+        }
+
+        resetEpisodeTracking()
+        state = .monitoring
+        prediction = unavailablePrediction(
+            summary: "Audio missing in current window",
+            updatedAt: window.endTime
+        )
+        eventBus.post(
+            RouteEvent(
+                timestamp: window.endTime,
+                routeId: routeId,
+                eventType: "audioMissing",
+                payload: [
+                    "windowId": "\(window.windowId)"
+                ]
+            )
+        )
+    }
+
+    private func handleFailedFusion(
+        window: FeatureWindow,
+        motion: MotionFeatures,
+        audio: AudioFeatures,
+        interaction: InteractionFeatures,
+        quietInteraction: Bool,
+        stillMotion: Bool,
+        quietAudio: Bool,
+        breathingSupport: Bool,
+        snoreSupport: Bool,
+        audioDisturbance: Bool,
+        playbackPolluted: Bool
+    ) {
+        let reason = rejectionReason(
+            quietInteraction: quietInteraction,
+            stillMotion: stillMotion,
+            quietAudio: quietAudio,
+            breathingSupport: breathingSupport,
+            snoreSupport: snoreSupport,
+            audioDisturbance: audioDisturbance,
+            playbackPolluted: playbackPolluted
+        )
+
+        if candidateAt != nil || actionReadyAt != nil {
+            let summary = actionReadyAt != nil
+                ? "Latched Route D episode waiting for recovery (\(consecutiveFailureWindows + 1)/2) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))"
+                : "Candidate Route D episode waiting for recovery (\(consecutiveFailureWindows + 1)/2) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))"
+            handleEpisodeFailure(
+                window: window,
+                motion: motion,
+                interaction: interaction,
+                summary: summary,
+                reason: reason
+            )
+            return
+        }
+
+        resetEpisodeTracking()
+        state = .monitoring
+        prediction = RoutePrediction(
+            routeId: routeId,
+            predictedSleepOnset: nil,
+            confidence: .none,
+            evidenceSummary: monitoringSummary(
+                motion: motion,
+                audio: audio,
+                interaction: interaction,
+                breathingSupport: breathingSupport,
+                snoreSupport: snoreSupport
+            ),
+            lastUpdated: window.endTime,
+            isAvailable: true
+        )
+    }
+
+    private func handleEpisodeFailure(
+        window: FeatureWindow,
+        motion: MotionFeatures,
+        interaction: InteractionFeatures,
+        summary: String,
+        reason: String
+    ) {
+        consecutiveFailureWindows += 1
+        let onsetEstimate = runStartTime ?? window.startTime
+        if consecutiveFailureWindows < 2 {
+            if actionReadyAt != nil {
+                state = .latched
+                prediction = episodePrediction(
+                    onsetEstimate: onsetEstimate,
+                    candidateAt: candidateAt,
+                    actionReadyAt: actionReadyAt,
+                    confidence: .confirmed,
+                    updatedAt: window.endTime,
+                    summary: summary
+                )
+            } else {
+                state = .candidate
+                prediction = episodePrediction(
+                    onsetEstimate: onsetEstimate,
+                    candidateAt: candidateAt,
+                    actionReadyAt: nil,
+                    confidence: .suspected,
+                    updatedAt: window.endTime,
+                    summary: summary
+                )
+            }
+            return
+        }
+
+        if let actionReadyAt {
+            eventBus.post(
+                RouteEvent(
+                    timestamp: window.endTime,
+                    routeId: routeId,
+                    eventType: "wakeDetected",
+                    payload: [
+                        "reason": reason,
+                        "wakeDetectedAt": ISO8601DateFormatter.cached.string(from: window.endTime),
+                        "actionReadyAt": ISO8601DateFormatter.cached.string(from: actionReadyAt),
+                        "candidateTime": ISO8601DateFormatter.cached.string(from: runStartTime ?? window.startTime)
+                    ]
+                )
+            )
+        } else if candidateAt != nil {
+            eventBus.post(
+                RouteEvent(
+                    timestamp: window.endTime,
+                    routeId: routeId,
+                    eventType: "sleepRejected",
+                    payload: [
+                        "reason": reason,
+                        "candidateTime": ISO8601DateFormatter.cached.string(from: runStartTime ?? window.startTime),
+                        "candidateAt": candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? ""
+                    ]
+                )
+            )
+        }
+
+        resetEpisodeTracking()
+        state = .monitoring
+        prediction = RoutePrediction(
+            routeId: routeId,
+            predictedSleepOnset: nil,
+            confidence: .none,
+            evidenceSummary: "Monitoring motion, audio, and interaction after \(reason)",
+            lastUpdated: window.endTime,
+            isAvailable: true
+        )
+    }
+
+    private func resetEpisodeTracking() {
+        consecutiveFusionWindows = 0
+        consecutiveFailureWindows = 0
+        runStartTime = nil
+        candidateAt = nil
+        actionReadyAt = nil
+    }
+
     private func unavailablePrediction(summary: String, updatedAt: Date) -> RoutePrediction {
         RoutePrediction(
             routeId: routeId,
@@ -1102,6 +1276,29 @@ final class RouteDEngine: RouteEngine {
             evidenceSummary: summary,
             lastUpdated: updatedAt,
             isAvailable: false
+        )
+    }
+
+    private func episodePrediction(
+        onsetEstimate: Date,
+        candidateAt: Date?,
+        actionReadyAt: Date?,
+        confidence: SleepConfidence,
+        updatedAt: Date,
+        summary: String
+    ) -> RoutePrediction {
+        RoutePrediction(
+            routeId: routeId,
+            predictedSleepOnset: onsetEstimate,
+            candidateAt: candidateAt,
+            confirmedAt: actionReadyAt,
+            actionReadyAt: actionReadyAt,
+            confidence: confidence,
+            evidenceSummary: summary,
+            lastUpdated: updatedAt,
+            isAvailable: true,
+            supportsImmediateAction: true,
+            isLatched: actionReadyAt != nil
         )
     }
 
@@ -1115,8 +1312,12 @@ final class RouteDEngine: RouteEngine {
         let breathingSummary: String
         if breathingSupport, let rate = audio.breathingRateEstimate {
             breathingSummary = "breathing \(String(format: "%.1f", rate)) bpm"
+        } else if let rawRate = audio.breathingRateEstimateRaw {
+            let suppression = audio.breathingSuppressionReason.map { " (\($0))" } ?? ""
+            breathingSummary = "breathing raw \(String(format: "%.1f", rawRate)) bpm @ \(audio.breathingPrePenaltyConfidence.formatted2)\(suppression)"
         } else {
-            breathingSummary = "breathing \(audio.breathingConfidence.formatted2)"
+            let suppression = audio.breathingSuppressionReason.map { " (\($0))" } ?? ""
+            breathingSummary = "breathing \(audio.breathingConfidence.formatted2)\(suppression)"
         }
         let snoreSummary = snoreSupport ? "snore \(audio.snoreCandidateCount)" : "snore 0"
         return "Waiting for sleep audio evidence. Motion \(motion.accelRMS.formatted3), audio \(audio.envNoiseLevel.formatted3), \(breathingSummary), \(snoreSummary), inactive \(Int(interaction.timeSinceLastInteraction / 60)) min"

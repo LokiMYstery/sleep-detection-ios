@@ -1,6 +1,6 @@
 # SPEC 04: 路线 D - 无 Watch 的 iPhone 多模态融合
 
-> **状态**：v1 已实现，参数待继续调优
+> **状态**：v2 已实现（quiet-fusion-first + 2 窗口回退迟滞），参数待继续调优
 > **前置文档**：SPEC 00 基础框架、SPEC 03 路线 C、《入睡检测 POC 实验路线与验证规划》§4 路线 D
 > **定位**：无 Watch 场景下的主推荐实验路线，最有可能成为无 Watch 产品主方案
 
@@ -12,7 +12,8 @@
 
 **核心实验问题**：多模态融合是否能明显优于纯体动方案？音频特征的增量价值是否值得麦克风权限成本？
 
-**与路线 C 的关系**：路线 D = 路线 C 的体动判定 + 音频证据 + 交互上下文，三路信号共同投票。
+**与路线 C 的关系**：路线 D = 路线 C 的体动判定 + 交互上下文 + 音频证据，但当前产品语义已经明确为 **quiet-fusion-first**：  
+只要交互静止、体动静止、音频满足 quiet-only，就允许 Route D 前进；呼吸/鼾声是增强正证据，不再把 Route D 定义成 breathing-first 路线。
 
 ---
 
@@ -50,6 +51,7 @@ struct AudioFeatures {
     let envNoiseLevel: Double
     let envNoiseVariance: Double
     let breathingRateEstimate: Double?
+    let breathingRateEstimateRaw: Double?
     let frictionEventCount: Int
     let isSilent: Bool
 
@@ -57,6 +59,9 @@ struct AudioFeatures {
     let breathingConfidence: Double
     let breathingPeriodicityScore: Double
     let breathingIntervalCV: Double?
+    let breathingBestCorrelation: Double
+    let breathingPrePenaltyConfidence: Double
+    let breathingSuppressionReason: String?
 
     let disturbanceScore: Double
     let playbackLeakageScore: Double
@@ -77,12 +82,16 @@ struct AudioFeatures {
 3. 在呼吸合理周期范围内做归一化自相关，寻找最佳周期。
 4. 结合相关峰值、周期稳定性（间隔 CV）、低频占比、扰动分数、播放泄漏分数，输出：
    `breathingPresent / breathingConfidence / breathingPeriodicityScore / breathingRateEstimate / breathingIntervalCV`
+5. 同时保留调试/分析字段：
+   `breathingRateEstimateRaw / breathingBestCorrelation / breathingPrePenaltyConfidence / breathingSuppressionReason`
 
 说明：
 
 - 当前阈值偏保守，误报成本高于漏报成本。
+- 即使 `isSilent == true`，当前实现也**不会**再直接短路呼吸估计；静音窗口仍会尝试提取 raw breathing diagnostics。
 - `breathingRateEstimate` 只有在 `breathingPresent == true` 时才作为 Route D 的正向证据。
 - 呼吸证据会被 `disturbanceScore` 和 `playbackLeakageScore` 主动削弱。
+- 因此当前呼吸链路的角色是：**提供可解释的增强证据与诊断信号**，而不是剥夺 quiet-only 的前进资格。
 
 ### 3.4 鼾声候选检测
 
@@ -111,13 +120,13 @@ struct AudioFeatures {
 
 ### 4.1 当前实现的三类 gating
 
-当前 Route D 不是宽松的 2/3 投票，而是更保守的门控：
+当前 Route D 不是宽松的 2/3 投票，而是更保守的门控。并且它的主语义已经调整为 **quiet-fusion route with optional breathing/snore positives**：
 
 | gating | 满足条件 | 作用 |
 |---|---|---|
 | `quietInteraction` | `isLocked == true` 且距离最后交互超过阈值，且 `screenWakeCount == 0` | 没有主动使用手机 |
 | `stillMotion` | `accelRMS <= motionStillnessThreshold` 且 `stillRatio >= 0.85` | 身体整体稳定 |
-| `audioSupportsSleep` | `quietAudio || breathingSupport || snoreSupport` | 音频要么整体安静，要么出现 sleep-like 呼吸/鼾声证据 |
+| `audioSupportsSleep` | `quietAudio || breathingSupport || snoreSupport` | 音频可以是 quiet-only，也可以出现 sleep-like 呼吸/鼾声证据 |
 
 ### 4.2 音频支持条件
 
@@ -169,29 +178,52 @@ if quietInteraction && stillMotion && audioSupportsSleep && !audioDisturbance {
 - `confirmWindowCount` 达到后进入 `confirmed`
 - 如果 `snoreSupport == true`，可额外增加 `snoreBoostWindowCount` 个窗口进度
 
-因此，当前 v1 的判定逻辑本质上是：
+因此，当前 v2 的判定逻辑本质上是：
 
 - 交互必须静止
 - 体动必须静止
 - 音频必须至少给出一种“支持睡眠”的证据
 - 同时排除明显干扰和播放污染
 
+并且当前实现新增了两个关键时间：
+
+- `runStartTime`：第一次满足 fusion gating 的窗口起点，用作 `predictedSleepOnset` / `onsetEstimate`
+- `actionReadyAt`：第一次达到确认门槛的窗口结束时间，用作真正的 confirm/action 时间
+
 ### 4.5 打断与回退
 
-任何一条证据通道的打断信号都可以触发回退：
+在进入 episode 之前，任何一条证据通道的打断都会直接清空累计；  
+但一旦已经进入 `candidate` 或 `actionReady` episode，当前实现改为 **2 个连续失败窗口** 后才真正结束 episode：
 
 | 打断源 | 条件 | 行为 |
 |---|---|---|
-| 交互打断 | 非锁屏、最近有交互、出现 screen wake | 回退到 monitoring |
-| 体动打断 | `stillMotion == false` | 回退到 monitoring |
-| 音频打断 | `audioSupportsSleep == false` 或 `audioDisturbance == true` | 回退到 monitoring |
-| 播放污染 | `playbackLeakageScore >= playbackLeakageRejectThreshold` | 明确拒绝当前窗口 |
+| 第 1 个失败窗口 | 任一 gating 失效 | 保留当前 episode，等待恢复，不重复发 confirm |
+| 第 2 个连续失败窗口（仅 candidate） | 任一 gating 持续失效 | 结束 episode，发送 `sleepRejected`，回到 `monitoring` |
+| 第 2 个连续失败窗口（已 actionReady） | 任一 gating 持续失效 | 结束 episode，发送 `wakeDetected`，回到 `monitoring` |
+| 播放污染 | `playbackLeakageScore >= playbackLeakageRejectThreshold` | 记为失败原因之一，但同样受 2-window hysteresis 保护 |
 
-单窗口的瞬时波动（如一声咳嗽、一次微翻身）不应触发完全回退。只有持续偏离才回退。
+因此单窗口瞬时波动（如咳嗽、一次微翻身、短时播放污染）默认不会立即抹掉已建立的 Route D confirm。
 
-### 4.6 入睡时间回溯
+### 4.6 onsetEstimate 与 action-ready 语义
 
-与路线 C 一致：`predictedSleepOnset = candidateEnteredTime`。
+当前 Route D 不再沿用“`candidateEnteredTime` 直接当 onset”这一旧语义，而是区分三类时间：
+
+- `predictedSleepOnset` / `onsetEstimate` = 本次连续 fusion run 的 `runStartTime`
+- `candidateAt` = 第一次达到 `candidateWindowCount` 的窗口结束时间
+- `confirmedAt` / `actionReadyAt` = 第一次达到 `confirmWindowCount` 的窗口结束时间
+
+其中：
+
+- `candidateWindowEntered`
+- `confirmedSleep`
+
+都只会在每个 episode **边沿触发一次**，不再每个后续窗口重复发送。
+
+补充说明：
+
+- Route D 的 `RoutePrediction` 当前会标记 `supportsImmediateAction = true`。
+- 这表示 **数据层语义上** Route D 已具备“action-ready”含义。
+- 但 **当前 App 运行时真正自动关音乐仍然只由 Route E 驱动**；Route D 的 action-ready 目前主要用于时间线、评估和后续产品化准备。
 
 ---
 
@@ -235,19 +267,19 @@ if quietInteraction && stillMotion && audioSupportsSleep && !audioDisturbance {
 ## 6. 判定状态流转
 
 ```
-monitoring → preSleep → candidate → confirmed
-    ↑           |           |
-    └───────────┘           |
-    └───────────────────────┘  (任意通道打断，回退)
+monitoring → candidate → actionReady → latched
+    ↑            |            |         |
+    └────────────┴────────────┴─────────┘  (2 个连续失败窗口后回退)
 ```
 
-与路线 C 状态机结构一致，但进入和退出条件基于更保守的融合 gating。
+`latched` 表示：该 episode 已经确认过，后续窗口只维持状态，不重复发送 `confirmedSleep`。
 
 | 状态 | 进入条件 | 退出条件 |
 |---|---|---|
-| `monitoring` | Session 开始 | `quietInteraction && stillMotion && audioSupportsSleep` |
-| `candidate` | 达到 `candidateWindowCount` | 达到 `confirmWindowCount` → `confirmed`；任一 gating 失效 → `monitoring` |
-| `confirmed` | 达到 `confirmWindowCount` | 终态 |
+| `monitoring` | Session 开始，或上个 episode 被拒绝/结束 | fusion gating 连续累计 |
+| `candidate` | 第一次达到 `candidateWindowCount` | 第一次达到 `confirmWindowCount` → `actionReady`；2 个连续失败窗口 → `monitoring` |
+| `actionReady` | 第一次达到 `confirmWindowCount` | 下一成功窗口转 `latched`；2 个连续失败窗口 → `monitoring + wakeDetected` |
+| `latched` | 已确认 episode 的维持态 | 2 个连续失败窗口 → `monitoring + wakeDetected` |
 
 ---
 
@@ -256,10 +288,10 @@ monitoring → preSleep → candidate → confirmed
 | 事件类型 | payload | 说明 |
 |---|---|---|
 | `audioMissing` | `windowId` | 当前窗口缺少音频特征 |
-| `candidateWindowEntered` | `candidateTime`, `fusionWindows`, `noise`, `breathingRate`, `snoreCount` | 进入候选 |
-| `suspectedSleep` | 同上 | 候选持续中 |
-| `confirmedSleep` | `predictedTime`, `method: "multimodalFusion"`, `fusionWindows`, `breathingRate`, `snoreCount` | 确认入睡 |
-| `sleepRejected` | `reason` | 被打断回退，当前实现的 reason 包括 `interaction_active / motion_active / playback_leakage / audio_disturbance / audio_no_sleep_pattern` |
+| `candidateWindowEntered` | `candidateTime`, `candidateAt`, `fusionWindows`, `noise`, `breathingRate`, `snoreCount` | 每个 episode 第一次进入候选时发送一次 |
+| `confirmedSleep` | `predictedTime`, `confirmedAt`, `actionReadyAt`, `method: "multimodalFusion"`, `fusionWindows`, `breathingRate`, `snoreCount` | 每个 episode 第一次确认时发送一次 |
+| `wakeDetected` | `reason`, `wakeDetectedAt`, `actionReadyAt`, `candidateTime` | 已 action-ready 的 episode 在 2 个连续失败窗口后结束 |
+| `sleepRejected` | `reason`, `candidateTime`, `candidateAt` | 仅 candidate 的 episode 在 2 个连续失败窗口后被拒绝 |
 | `system.audioRuntimeSnapshot` | runtime snapshot payload | 后台麦克风/图状态诊断 |
 
 ---
@@ -297,8 +329,10 @@ func canRun(condition: DeviceCondition, priorLevel: PriorLevel) -> Bool {
 
 | 指标 | 对比对象 | 说明 |
 |---|---|---|
-| 绝对误差中位数 | 路线 A、B、C | 多模态是否显著优于纯体动 |
+| `action_ready_delay / confirm_delay` | truth onset、路线 A/B/C | Route D 真正可动作时间是否足够准 |
+| `confirm_vs_onset_gap` | — | onsetEstimate 与 confirm/actionReady 的间隔是否合理 |
 | 安静清醒误判率 | 路线 C | Route D 是否更少把卧床清醒判成入睡 |
+| quiet-only 确认占比 | — | Route D 当前是否主要退化成 quiet-fusion 回退 |
 | 呼吸支持命中率 | — | `breathingPresent == true` 的窗口比例 |
 | 鼾声候选有效率 | — | `snoreCandidateCount > 0` 的窗口中有多少是真正 sleep-like |
 | 播放泄漏触发率 | — | 背景音乐/静默输出是否仍污染判定 |
@@ -314,6 +348,6 @@ func canRun(condition: DeviceCondition, priorLevel: PriorLevel) -> Bool {
 | 用户拒绝麦克风权限 | Route D 返回 unavailable | 降级到 Route C |
 | 背景模式配置错误 | 锁屏/后台后直接掉麦 | 强制启用 Background Modes + `audio`，导出 runtime snapshot |
 | 用户播放音频或输出残留 | 播放污染麦克风特征 | `voice processing` + `playbackLeakageScore` 拒绝 |
-| 呼吸证据偏弱 | 很多窗口无法给出正向呼吸支持 | 保守阈值，允许 quietAudio/snoreSupport 独立成立 |
+| 呼吸证据偏弱 | 很多窗口无法给出稳定正向呼吸支持 | 允许 quietAudio 独立成立，并持续保留 raw breathing diagnostics 供后续调参 |
 | 鼾声候选误报 | 非睡眠短测时也可能命中 | 与交互/体动 gating 联合使用，不单独确认 |
 | 环境持续风噪/空调/他人声音 | `disturbanceScore` 升高，Route D 难确认 | 后续继续调 `disturbanceScore` 与 snore 策略 |

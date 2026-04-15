@@ -7,6 +7,7 @@ final class AppModel: ObservableObject {
     @Published var currentSession: Session?
     @Published var sessionBundles: [SessionBundle] = []
     @Published var activePredictions: [RoutePrediction] = []
+    @Published var activeTimeline: SleepTimeline?
     @Published var recentWindows: [FeatureWindow] = []
     @Published var settings: ExperimentSettings = .default
     @Published var priorSnapshot: PriorSnapshot = .empty
@@ -68,6 +69,7 @@ final class AppModel: ObservableObject {
     private var watchAutoStopTask: Task<Void, Never>?
     private var didAutoStopWatchForCurrentSession = false
     private var didRequestOrphanWatchCleanup = false
+    private var timelineTracker = SleepTimelineTracker()
 
     /// App-level error type for UI display
     struct AppError: Identifiable, Equatable {
@@ -409,6 +411,11 @@ final class AppModel: ObservableObject {
         lastWindowBoundary = start
         eventBus.reset()
         resetWatchStartupTracking()
+        timelineTracker.startSession(at: start)
+        activeTimeline = timelineTracker.timeline
+        if let activeTimeline {
+            try? await repository.saveTimeline(activeTimeline, for: session.sessionId)
+        }
 
         eventSubscriptionID = eventBus.subscribe { [weak self] event in
             guard let self, let sessionId = self.currentSession?.sessionId else { return }
@@ -514,6 +521,9 @@ final class AppModel: ObservableObject {
 
         try? await repository.updateSession(session)
         try? await repository.savePredictions(activePredictions, for: session.sessionId)
+        if let activeTimeline {
+            try? await repository.saveTimeline(activeTimeline, for: session.sessionId)
+        }
         try? await truthRefillService.refillPendingTruths()
 
         if let eventSubscriptionID {
@@ -522,6 +532,8 @@ final class AppModel: ObservableObject {
         }
 
         currentSession = nil
+        activeTimeline = nil
+        timelineTracker.reset()
         resetWatchStartupTracking()
         updateAudioRuntimeState(recordEvents: false)
         updateWatchRuntimeState(recordEvents: false)
@@ -1004,12 +1016,17 @@ final class AppModel: ObservableObject {
         let previousRouteEPrediction = activePredictions.first { $0.routeId == .E }
         routeRunner?.process(window: window)
         activePredictions = routeRunner?.currentPredictions() ?? activePredictions
+        timelineTracker.sync(predictions: activePredictions, updatedAt: window.endTime)
+        activeTimeline = timelineTracker.timeline
         syncWatchAutoStopState(previousRouteEPrediction: previousRouteEPrediction, sessionId: sessionId)
         postPredictionSnapshot()
 
         // Handle prediction save errors
         do {
             try await repository.savePredictions(activePredictions, for: sessionId)
+            if let activeTimeline {
+                try await repository.saveTimeline(activeTimeline, for: sessionId)
+            }
         } catch {
             await reportError(
                 title: "Failed to Save Predictions",

@@ -110,12 +110,16 @@ struct AudioFeatures: Codable, Equatable, Sendable {
     var envNoiseLevel: Double
     var envNoiseVariance: Double
     var breathingRateEstimate: Double?
+    var breathingRateEstimateRaw: Double?
     var frictionEventCount: Int
     var isSilent: Bool
     var breathingPresent: Bool
     var breathingConfidence: Double
     var breathingPeriodicityScore: Double
     var breathingIntervalCV: Double?
+    var breathingBestCorrelation: Double
+    var breathingPrePenaltyConfidence: Double
+    var breathingSuppressionReason: String?
     var disturbanceScore: Double
     var playbackLeakageScore: Double
     var snoreCandidateCount: Int
@@ -127,12 +131,16 @@ struct AudioFeatures: Codable, Equatable, Sendable {
         envNoiseLevel: Double,
         envNoiseVariance: Double,
         breathingRateEstimate: Double?,
+        breathingRateEstimateRaw: Double? = nil,
         frictionEventCount: Int,
         isSilent: Bool,
         breathingPresent: Bool = false,
         breathingConfidence: Double = 0,
         breathingPeriodicityScore: Double = 0,
         breathingIntervalCV: Double? = nil,
+        breathingBestCorrelation: Double = 0,
+        breathingPrePenaltyConfidence: Double = 0,
+        breathingSuppressionReason: String? = nil,
         disturbanceScore: Double = 0,
         playbackLeakageScore: Double = 0,
         snoreCandidateCount: Int = 0,
@@ -143,12 +151,16 @@ struct AudioFeatures: Codable, Equatable, Sendable {
         self.envNoiseLevel = envNoiseLevel
         self.envNoiseVariance = envNoiseVariance
         self.breathingRateEstimate = breathingRateEstimate
+        self.breathingRateEstimateRaw = breathingRateEstimateRaw
         self.frictionEventCount = frictionEventCount
         self.isSilent = isSilent
         self.breathingPresent = breathingPresent
         self.breathingConfidence = breathingConfidence
         self.breathingPeriodicityScore = breathingPeriodicityScore
         self.breathingIntervalCV = breathingIntervalCV
+        self.breathingBestCorrelation = breathingBestCorrelation
+        self.breathingPrePenaltyConfidence = breathingPrePenaltyConfidence
+        self.breathingSuppressionReason = breathingSuppressionReason
         self.disturbanceScore = disturbanceScore
         self.playbackLeakageScore = playbackLeakageScore
         self.snoreCandidateCount = snoreCandidateCount
@@ -161,12 +173,16 @@ struct AudioFeatures: Codable, Equatable, Sendable {
         case envNoiseLevel
         case envNoiseVariance
         case breathingRateEstimate
+        case breathingRateEstimateRaw
         case frictionEventCount
         case isSilent
         case breathingPresent
         case breathingConfidence
         case breathingPeriodicityScore
         case breathingIntervalCV
+        case breathingBestCorrelation
+        case breathingPrePenaltyConfidence
+        case breathingSuppressionReason
         case disturbanceScore
         case playbackLeakageScore
         case snoreCandidateCount
@@ -181,12 +197,16 @@ struct AudioFeatures: Codable, Equatable, Sendable {
             envNoiseLevel: try container.decode(Double.self, forKey: .envNoiseLevel),
             envNoiseVariance: try container.decode(Double.self, forKey: .envNoiseVariance),
             breathingRateEstimate: try container.decodeIfPresent(Double.self, forKey: .breathingRateEstimate),
+            breathingRateEstimateRaw: try container.decodeIfPresent(Double.self, forKey: .breathingRateEstimateRaw),
             frictionEventCount: try container.decode(Int.self, forKey: .frictionEventCount),
             isSilent: try container.decode(Bool.self, forKey: .isSilent),
             breathingPresent: try container.decodeIfPresent(Bool.self, forKey: .breathingPresent) ?? false,
             breathingConfidence: try container.decodeIfPresent(Double.self, forKey: .breathingConfidence) ?? 0,
             breathingPeriodicityScore: try container.decodeIfPresent(Double.self, forKey: .breathingPeriodicityScore) ?? 0,
             breathingIntervalCV: try container.decodeIfPresent(Double.self, forKey: .breathingIntervalCV),
+            breathingBestCorrelation: try container.decodeIfPresent(Double.self, forKey: .breathingBestCorrelation) ?? 0,
+            breathingPrePenaltyConfidence: try container.decodeIfPresent(Double.self, forKey: .breathingPrePenaltyConfidence) ?? 0,
+            breathingSuppressionReason: try container.decodeIfPresent(String.self, forKey: .breathingSuppressionReason),
             disturbanceScore: try container.decodeIfPresent(Double.self, forKey: .disturbanceScore) ?? 0,
             playbackLeakageScore: try container.decodeIfPresent(Double.self, forKey: .playbackLeakageScore) ?? 0,
             snoreCandidateCount: try container.decodeIfPresent(Int.self, forKey: .snoreCandidateCount) ?? 0,
@@ -1111,28 +1131,409 @@ struct RoutePrediction: Codable, Identifiable, Equatable, Sendable {
     var id: RouteId { routeId }
     var routeId: RouteId
     var predictedSleepOnset: Date?
+    var candidateAt: Date?
     var confirmedAt: Date?
+    var actionReadyAt: Date?
     var confidence: SleepConfidence
     var evidenceSummary: String
     var lastUpdated: Date
     var isAvailable: Bool
+    var supportsImmediateAction: Bool
+    var isLatched: Bool
 
     init(
         routeId: RouteId,
         predictedSleepOnset: Date?,
+        candidateAt: Date? = nil,
         confirmedAt: Date? = nil,
+        actionReadyAt: Date? = nil,
         confidence: SleepConfidence,
         evidenceSummary: String,
         lastUpdated: Date,
-        isAvailable: Bool
+        isAvailable: Bool,
+        supportsImmediateAction: Bool = false,
+        isLatched: Bool = false
     ) {
         self.routeId = routeId
         self.predictedSleepOnset = predictedSleepOnset
+        self.candidateAt = candidateAt
         self.confirmedAt = confirmedAt
+        self.actionReadyAt = actionReadyAt
         self.confidence = confidence
         self.evidenceSummary = evidenceSummary
         self.lastUpdated = lastUpdated
         self.isAvailable = isAvailable
+        self.supportsImmediateAction = supportsImmediateAction
+        self.isLatched = isLatched
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case routeId
+        case predictedSleepOnset
+        case candidateAt
+        case confirmedAt
+        case actionReadyAt
+        case confidence
+        case evidenceSummary
+        case lastUpdated
+        case isAvailable
+        case supportsImmediateAction
+        case isLatched
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            routeId: try container.decode(RouteId.self, forKey: .routeId),
+            predictedSleepOnset: try container.decodeIfPresent(Date.self, forKey: .predictedSleepOnset),
+            candidateAt: try container.decodeIfPresent(Date.self, forKey: .candidateAt),
+            confirmedAt: try container.decodeIfPresent(Date.self, forKey: .confirmedAt),
+            actionReadyAt: try container.decodeIfPresent(Date.self, forKey: .actionReadyAt),
+            confidence: try container.decode(SleepConfidence.self, forKey: .confidence),
+            evidenceSummary: try container.decode(String.self, forKey: .evidenceSummary),
+            lastUpdated: try container.decode(Date.self, forKey: .lastUpdated),
+            isAvailable: try container.decode(Bool.self, forKey: .isAvailable),
+            supportsImmediateAction: try container.decodeIfPresent(Bool.self, forKey: .supportsImmediateAction) ?? false,
+            isLatched: try container.decodeIfPresent(Bool.self, forKey: .isLatched) ?? false
+        )
+    }
+}
+
+enum SleepActionStatus: String, Codable, CaseIterable, Sendable {
+    case notTriggered
+    case triggered
+    case suppressed
+    case failed
+}
+
+enum NightState: String, Codable, CaseIterable, Sendable {
+    case monitoring
+    case candidate
+    case actionReady
+}
+
+enum EpisodeKind: String, Codable, CaseIterable, Sendable {
+    case primary
+    case reOnset
+}
+
+enum EpisodeState: String, Codable, CaseIterable, Sendable {
+    case monitoring
+    case candidate
+    case actionReady
+    case ended
+    case rejected
+}
+
+enum ActionEligibility: String, Codable, CaseIterable, Sendable {
+    case eligible
+    case alreadyHandled
+    case ineligible
+}
+
+enum SleepAction: String, Codable, CaseIterable, Sendable {
+    case stopMusic
+}
+
+enum SleepActionResult: String, Codable, CaseIterable, Sendable {
+    case executed
+    case suppressed
+    case skipped
+    case failed
+}
+
+struct RouteEpisodeEvidence: Codable, Equatable, Sendable {
+    var routeId: RouteId
+    var candidateAt: Date?
+    var actionReadyAt: Date?
+    var onsetEstimate: Date?
+    var confidence: SleepConfidence
+    var confirmType: String?
+    var evidenceSummary: String
+    var isBackfilled: Bool
+    var supportsImmediateAction: Bool
+    var isLatched: Bool
+}
+
+struct SleepEpisode: Codable, Equatable, Sendable {
+    var episodeIndex: Int
+    var kind: EpisodeKind
+    var candidateAt: Date?
+    var actionReadyAt: Date?
+    var onsetEstimate: Date?
+    var wakeDetectedAt: Date?
+    var endedAt: Date?
+    var state: EpisodeState
+    var actionEligibility: ActionEligibility
+    var routeEvidence: [RouteEpisodeEvidence]
+}
+
+struct SleepActionDecision: Codable, Equatable, Sendable {
+    var episodeIndex: Int
+    var action: SleepAction
+    var decidedAt: Date
+    var executedAt: Date?
+    var result: SleepActionResult
+    var reason: String
+}
+
+struct SleepTimeline: Codable, Equatable, Sendable {
+    var primaryEpisodeIndex: Int?
+    var primaryActionReadyAt: Date?
+    var primaryOnsetEstimate: Date?
+    var actionTakenAt: Date?
+    var actionStatus: SleepActionStatus
+    var latestNightState: NightState
+    var episodes: [SleepEpisode]
+    var actionDecisions: [SleepActionDecision]
+    var lastUpdated: Date
+}
+
+struct SleepTimelineTracker: Sendable {
+    private(set) var timeline: SleepTimeline?
+
+    mutating func startSession(at startTime: Date) {
+        timeline = SleepTimeline(
+            primaryEpisodeIndex: nil,
+            primaryActionReadyAt: nil,
+            primaryOnsetEstimate: nil,
+            actionTakenAt: nil,
+            actionStatus: .notTriggered,
+            latestNightState: .monitoring,
+            episodes: [],
+            actionDecisions: [],
+            lastUpdated: startTime
+        )
+    }
+
+    mutating func reset() {
+        timeline = nil
+    }
+
+    mutating func sync(predictions: [RoutePrediction], updatedAt: Date) {
+        if timeline == nil {
+            startSession(at: updatedAt)
+        }
+        guard var timeline else { return }
+
+        let activeEvidence = predictions.compactMap(Self.routeEvidence(from:))
+
+        if let openIndex = Self.openEpisodeIndex(in: timeline) {
+            if activeEvidence.isEmpty {
+                Self.closeEpisode(at: openIndex, updatedAt: updatedAt, timeline: &timeline)
+            } else {
+                Self.merge(activeEvidence: activeEvidence, into: openIndex, updatedAt: updatedAt, timeline: &timeline)
+            }
+        } else if !activeEvidence.isEmpty {
+            Self.openEpisode(with: activeEvidence, updatedAt: updatedAt, timeline: &timeline)
+        } else {
+            timeline.latestNightState = .monitoring
+        }
+
+        timeline.lastUpdated = updatedAt
+        self.timeline = timeline
+    }
+
+    private static func routeEvidence(from prediction: RoutePrediction) -> RouteEpisodeEvidence? {
+        guard prediction.isAvailable else { return nil }
+
+        let candidateAt = prediction.candidateAt ?? prediction.actionReadyAt ?? prediction.confirmedAt
+        let actionReadyAt = prediction.actionReadyAt ?? prediction.confirmedAt
+        guard candidateAt != nil || actionReadyAt != nil else { return nil }
+
+        let supportsImmediateAction: Bool
+        switch prediction.routeId {
+        case .D:
+            supportsImmediateAction = prediction.supportsImmediateAction
+        case .E:
+            supportsImmediateAction = true
+        default:
+            supportsImmediateAction = false
+        }
+
+        let onsetEstimate = prediction.predictedSleepOnset
+        let isBackfilled: Bool
+        if let onsetEstimate, let actionReadyAt {
+            isBackfilled = onsetEstimate < actionReadyAt
+        } else {
+            isBackfilled = false
+        }
+
+        return RouteEpisodeEvidence(
+            routeId: prediction.routeId,
+            candidateAt: candidateAt,
+            actionReadyAt: actionReadyAt,
+            onsetEstimate: onsetEstimate,
+            confidence: prediction.confidence,
+            confirmType: nil,
+            evidenceSummary: prediction.evidenceSummary,
+            isBackfilled: isBackfilled,
+            supportsImmediateAction: supportsImmediateAction,
+            isLatched: prediction.isLatched || actionReadyAt != nil
+        )
+    }
+
+    private static func openEpisode(with activeEvidence: [RouteEpisodeEvidence], updatedAt: Date, timeline: inout SleepTimeline) {
+        let episodeIndex = timeline.episodes.count
+        let kind: EpisodeKind = timeline.episodes.isEmpty ? .primary : .reOnset
+        let actionEligibility = timeline.actionStatus == .triggered
+            ? ActionEligibility.alreadyHandled
+            : (activeEvidence.contains { $0.supportsImmediateAction } ? .eligible : .ineligible)
+
+        let actionReadyAt = earliestActionReadyAt(in: activeEvidence)
+        let episode = SleepEpisode(
+            episodeIndex: episodeIndex,
+            kind: kind,
+            candidateAt: earliestCandidateAt(in: activeEvidence),
+            actionReadyAt: actionReadyAt,
+            onsetEstimate: preferredOnsetEstimate(in: activeEvidence),
+            wakeDetectedAt: nil,
+            endedAt: nil,
+            state: actionReadyAt == nil ? .candidate : .actionReady,
+            actionEligibility: actionEligibility,
+            routeEvidence: activeEvidence.sorted { $0.routeId.rawValue < $1.routeId.rawValue }
+        )
+
+        timeline.episodes.append(episode)
+        updatePrimaryMetadata(from: episodeIndex, timeline: &timeline)
+        timeline.latestNightState = episode.actionReadyAt == nil ? .candidate : .actionReady
+        timeline.lastUpdated = updatedAt
+    }
+
+    private static func merge(activeEvidence: [RouteEpisodeEvidence], into episodeIndex: Int, updatedAt: Date, timeline: inout SleepTimeline) {
+        guard timeline.episodes.indices.contains(episodeIndex) else { return }
+        var episode = timeline.episodes[episodeIndex]
+        var mergedByRoute = Dictionary(uniqueKeysWithValues: episode.routeEvidence.map { ($0.routeId, $0) })
+
+        for evidence in activeEvidence {
+            if let existing = mergedByRoute[evidence.routeId] {
+                mergedByRoute[evidence.routeId] = merge(existing: existing, with: evidence)
+            } else {
+                mergedByRoute[evidence.routeId] = evidence
+            }
+        }
+
+        let mergedEvidence = mergedByRoute.values.sorted { $0.routeId.rawValue < $1.routeId.rawValue }
+        episode.routeEvidence = mergedEvidence
+        episode.candidateAt = minDate(episode.candidateAt, earliestCandidateAt(in: mergedEvidence))
+
+        let earliestActionReady = earliestActionReadyAt(in: mergedEvidence)
+        episode.actionReadyAt = minDate(episode.actionReadyAt, earliestActionReady)
+        if let actionOnset = preferredOnsetEstimate(in: mergedEvidence, preferActionReady: true) {
+            episode.onsetEstimate = episode.onsetEstimate ?? actionOnset
+        } else if episode.onsetEstimate == nil {
+            episode.onsetEstimate = preferredOnsetEstimate(in: mergedEvidence)
+        }
+
+        if timeline.actionStatus == .triggered {
+            episode.actionEligibility = .alreadyHandled
+        } else if mergedEvidence.contains(where: { $0.supportsImmediateAction }) {
+            episode.actionEligibility = .eligible
+        } else {
+            episode.actionEligibility = .ineligible
+        }
+
+        episode.state = episode.actionReadyAt == nil ? .candidate : .actionReady
+        timeline.episodes[episodeIndex] = episode
+        updatePrimaryMetadata(from: episodeIndex, timeline: &timeline)
+        timeline.latestNightState = episode.actionReadyAt == nil ? .candidate : .actionReady
+        timeline.lastUpdated = updatedAt
+    }
+
+    private static func closeEpisode(at episodeIndex: Int, updatedAt: Date, timeline: inout SleepTimeline) {
+        guard timeline.episodes.indices.contains(episodeIndex) else { return }
+        var episode = timeline.episodes[episodeIndex]
+        if episode.actionReadyAt != nil {
+            episode.wakeDetectedAt = episode.wakeDetectedAt ?? updatedAt
+            episode.endedAt = updatedAt
+            episode.state = .ended
+        } else {
+            episode.endedAt = updatedAt
+            episode.state = .rejected
+        }
+        timeline.episodes[episodeIndex] = episode
+        timeline.latestNightState = .monitoring
+        timeline.lastUpdated = updatedAt
+    }
+
+    private static func updatePrimaryMetadata(from episodeIndex: Int, timeline: inout SleepTimeline) {
+        guard timeline.episodes.indices.contains(episodeIndex) else { return }
+        let episode = timeline.episodes[episodeIndex]
+        guard
+            timeline.primaryEpisodeIndex == nil,
+            episode.actionEligibility == .eligible,
+            let actionReadyAt = episode.actionReadyAt
+        else { return }
+
+        timeline.primaryEpisodeIndex = episode.episodeIndex
+        timeline.primaryActionReadyAt = actionReadyAt
+        timeline.primaryOnsetEstimate = episode.onsetEstimate
+    }
+
+    private static func merge(existing: RouteEpisodeEvidence, with latest: RouteEpisodeEvidence) -> RouteEpisodeEvidence {
+        RouteEpisodeEvidence(
+            routeId: latest.routeId,
+            candidateAt: minDate(existing.candidateAt, latest.candidateAt),
+            actionReadyAt: minDate(existing.actionReadyAt, latest.actionReadyAt),
+            onsetEstimate: existing.onsetEstimate ?? latest.onsetEstimate,
+            confidence: latest.confidence,
+            confirmType: latest.confirmType ?? existing.confirmType,
+            evidenceSummary: latest.evidenceSummary,
+            isBackfilled: existing.isBackfilled || latest.isBackfilled,
+            supportsImmediateAction: existing.supportsImmediateAction || latest.supportsImmediateAction,
+            isLatched: existing.isLatched || latest.isLatched
+        )
+    }
+
+    private static func earliestCandidateAt(in evidence: [RouteEpisodeEvidence]) -> Date? {
+        evidence.compactMap(\.candidateAt).min()
+    }
+
+    private static func earliestActionReadyAt(in evidence: [RouteEpisodeEvidence]) -> Date? {
+        evidence
+            .filter(\.supportsImmediateAction)
+            .compactMap(\.actionReadyAt)
+            .min()
+    }
+
+    private static func preferredOnsetEstimate(in evidence: [RouteEpisodeEvidence], preferActionReady: Bool = false) -> Date? {
+        let filtered: [RouteEpisodeEvidence]
+        if preferActionReady {
+            filtered = evidence.filter { $0.supportsImmediateAction && $0.actionReadyAt != nil }
+            if filtered.isEmpty {
+                return nil
+            }
+        } else {
+            filtered = evidence
+        }
+
+        return filtered
+            .sorted { lhs, rhs in
+                let lhsAnchor = lhs.actionReadyAt ?? lhs.candidateAt ?? .distantFuture
+                let rhsAnchor = rhs.actionReadyAt ?? rhs.candidateAt ?? .distantFuture
+                return lhsAnchor < rhsAnchor
+            }
+            .compactMap(\.onsetEstimate)
+            .first
+    }
+
+    private static func openEpisodeIndex(in timeline: SleepTimeline) -> Int? {
+        timeline.episodes.lastIndex {
+            $0.endedAt == nil && $0.state != .ended && $0.state != .rejected
+        }
+    }
+
+    private static func minDate(_ lhs: Date?, _ rhs: Date?) -> Date? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?):
+            return min(lhs, rhs)
+        case let (lhs?, nil):
+            return lhs
+        case let (nil, rhs?):
+            return rhs
+        case (nil, nil):
+            return nil
+        }
     }
 }
 
@@ -1277,6 +1678,7 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
     var events: [RouteEvent]
     var predictions: [RoutePrediction]
     var truth: TruthRecord?
+    var timeline: SleepTimeline? = nil
 
     var sampleQuality: SampleQuality {
         if session.status == .archived && truth == nil {
@@ -1341,6 +1743,7 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
     var events: [RouteEvent]
     var predictions: [RoutePrediction]
     var truth: TruthRecord?
+    var timeline: SleepTimeline?
     var diagnostics: SessionDiagnosticsSummary
 
     init(bundle: SessionBundle) {
@@ -1349,6 +1752,7 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
         self.events = bundle.events
         self.predictions = bundle.predictions
         self.truth = bundle.truth
+        self.timeline = bundle.timeline
         self.diagnostics = bundle.diagnostics
     }
 }
