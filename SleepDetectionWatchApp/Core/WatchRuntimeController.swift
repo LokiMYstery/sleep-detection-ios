@@ -80,6 +80,38 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         log("activateIfNeeded: watch runtime ready")
     }
 
+    func handleScenePhase(_ phase: ScenePhase) {
+        let phaseLabel: String
+        switch phase {
+        case .active:
+            phaseLabel = "active"
+        case .inactive:
+            phaseLabel = "inactive"
+        case .background:
+            phaseLabel = "background"
+        @unknown default:
+            phaseLabel = "unknown"
+        }
+
+        log("handleScenePhase: phase=\(phaseLabel)")
+        activateIfNeeded()
+
+        switch phase {
+        case .active:
+            consumeLatestApplicationContextIfPresent()
+            let authorizationState = refreshHealthAuthorizationState(requestIfNeeded: true)
+            if authorizationState == .authorized {
+                continuePendingSessionAfterAuthorizationIfNeeded()
+            }
+            flushQueuedPayloadsIfPossible()
+            refreshConnectivity()
+        case .inactive, .background:
+            refreshConnectivity()
+        @unknown default:
+            refreshConnectivity()
+        }
+    }
+
     func handle(workoutConfiguration: HKWorkoutConfiguration) {
         log(
             "handleWorkoutConfiguration: activityType=\(workoutConfiguration.activityType.rawValue) locationType=\(workoutConfiguration.locationType.rawValue)"

@@ -721,8 +721,7 @@ final class AppModel: ObservableObject {
     private func isWatchReadyForRealtime(_ snapshot: WatchRuntimeSnapshot) -> Bool {
         snapshot.runtimeState == .readyForRealtime ||
         snapshot.runtimeState == .workoutStarted ||
-        snapshot.runtimeState == .mirrorConnected ||
-        snapshot.lastWindowAt != nil
+        snapshot.runtimeState == .mirrorConnected
     }
 
     private func persistWatchSetupCompleted(_ completed: Bool) {

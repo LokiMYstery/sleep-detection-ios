@@ -1442,6 +1442,44 @@ struct SleepDetectionPOCTests {
         #expect(model.debugWatchSetupCompletedState() == true)
     }
 
+    @Test("AppModel does not treat stale watch windows as setup-ready")
+    @MainActor
+    func appModelDoesNotUseStaleWatchWindowAsSetupReady() async throws {
+        let settingsStore = TestSettingsStore()
+        let watchProvider = RecordingWatchProvider()
+        let model = AppModel(settingsStore: settingsStore, watchProvider: watchProvider)
+
+        var session = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_712_665_200),
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        session.status = .recording
+
+        model.debugPreparePendingWatchSessionStart(for: session)
+        let staleWindowTime = session.startTime.addingTimeInterval(-120)
+        model.debugApplyWatchRuntimeSnapshot(
+            WatchRuntimeSnapshot(
+                isSupported: true,
+                isPaired: true,
+                isWatchAppInstalled: true,
+                isReachable: false,
+                activationState: .activated,
+                runtimeState: .launchRequested,
+                transportMode: .wcSessionFallback,
+                lastCommandAt: session.startTime,
+                lastAckAt: nil,
+                lastWindowAt: staleWindowTime,
+                lastError: nil,
+                pendingWindowCount: 0
+            )
+        )
+
+        #expect(watchProvider.startedSessionIds.isEmpty)
+        #expect(model.debugWatchSetupCompletedState() == false)
+    }
+
     @Test("AppModel uses direct watch start bootstrap after initial setup completion")
     @MainActor
     func appModelUsesDirectWatchStartBootstrapAfterSetupCompletion() async throws {

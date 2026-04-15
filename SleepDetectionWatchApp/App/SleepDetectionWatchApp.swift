@@ -5,6 +5,7 @@ import WatchKit
 @main
 struct SleepDetectionWatchApp: App {
     @WKApplicationDelegateAdaptor(WatchExtensionDelegate.self) private var extensionDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = WatchRuntimeController.shared
 
     var body: some Scene {
@@ -13,6 +14,11 @@ struct SleepDetectionWatchApp: App {
                 .environmentObject(model)
                 .task {
                     model.activateIfNeeded()
+                }
+                .onChange(of: scenePhase) { _, newValue in
+                    Task { @MainActor in
+                        model.handleScenePhase(newValue)
+                    }
                 }
         }
     }
