@@ -999,13 +999,13 @@ extension LiveWatchProvider: HKWorkoutSessionDelegate {
 
     func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: any Error) {
         protectedState.write { state in
-            state.currentRuntime.runtimeState = .workoutFailed
+            state.currentRuntime.runtimeState = .mirrorDisconnected
             state.currentRuntime.lastError = error.localizedDescription
             state.currentRuntime.transportMode = .wcSessionFallback
         }
         appendDiagnostic(
             stage: "mirroring.fail",
-            message: "Mirrored workout session failed on iPhone",
+            message: "Mirrored workout session failed on iPhone; degrading to WC fallback",
             extra: [
                 "error": error.localizedDescription
             ]

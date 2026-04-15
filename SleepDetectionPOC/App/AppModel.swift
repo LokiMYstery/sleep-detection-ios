@@ -1312,6 +1312,21 @@ final class AppModel: ObservableObject {
                     ]
                 )
             )
+        } else if previous?.transportMode != .wcSessionFallback,
+                  snapshot.transportMode == .wcSessionFallback,
+                  snapshot.runtimeState == .workoutStarted ||
+                  snapshot.runtimeState == .mirrorDisconnected {
+            eventBus.post(
+                RouteEvent(
+                    routeId: .E,
+                    eventType: "custom.watchTransportFallback",
+                    payload: [
+                        "runtimeState": snapshot.runtimeState.rawValue,
+                        "transportMode": snapshot.transportMode.rawValue,
+                        "lastError": snapshot.lastError ?? ""
+                    ]
+                )
+            )
         }
 
         evaluateWatchStartupTimeouts(now: Date(), snapshot: snapshot)

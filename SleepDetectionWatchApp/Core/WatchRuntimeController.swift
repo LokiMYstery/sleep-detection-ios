@@ -219,7 +219,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         case .mirrorConnected:
             return "Recording (Mirror Connected)"
         case .mirrorDisconnected:
-            return "Recording (Mirror Disconnected)"
+            return transportMode == .wcSessionFallback ? "Recording (WC Fallback)" : "Recording (Mirror Disconnected)"
         case .stopped:
             return "Idle"
         }
@@ -771,13 +771,18 @@ final class WatchRuntimeController: NSObject, ObservableObject {
                     self.log("startMirroringIfPossible: mirroring connected")
                     self.sendRuntimeStatus(.mirrorConnected, transportMode: .mirroredWorkoutSession, preferMirroring: true)
                 } else {
+                    let errorDescription = error?.localizedDescription ?? "Failed to start workout mirroring."
                     self.currentTransportMode = .wcSessionFallback
                     self.status = "Recording (WC Fallback)"
-                    self.log("startMirroringIfPossible: mirroring failed error=\(error?.localizedDescription ?? "nil")")
+                    self.log("startMirroringIfPossible: mirroring failed error=\(errorDescription)")
                     self.sendRuntimeStatus(
-                        .workoutFailed,
+                        .workoutStarted,
                         transportMode: .wcSessionFallback,
-                        lastError: error?.localizedDescription ?? "Failed to start workout mirroring.",
+                        lastError: errorDescription,
+                        details: [
+                            "diagnosticEvent": "custom.watchTransportFallback",
+                            "reason": "mirroringStartFailed"
+                        ],
                         preferMirroring: false
                     )
                 }
@@ -866,7 +871,10 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             return
         }
 
-        let runtimeReady = currentRuntimeState == .workoutStarted || currentRuntimeState == .mirrorConnected
+        let runtimeReady =
+            currentRuntimeState == .workoutStarted ||
+            currentRuntimeState == .mirrorConnected ||
+            currentRuntimeState == .mirrorDisconnected
         guard runtimeReady else {
             log("emitWindow: dropped reason=workoutNotRunning state=\(currentRuntimeState.rawValue)")
             sendDiagnosticStatusEvent(
@@ -1244,11 +1252,15 @@ extension WatchRuntimeController: HKWorkoutSessionDelegate {
         Task { @MainActor in
             self.log("HKWorkoutSession mirror disconnected error=\(error?.localizedDescription ?? "nil")")
             self.currentTransportMode = .wcSessionFallback
-            self.status = "Recording (Mirror Disconnected)"
+            self.status = "Recording (WC Fallback)"
             self.sendRuntimeStatus(
                 .mirrorDisconnected,
                 transportMode: .wcSessionFallback,
                 lastError: error?.localizedDescription,
+                details: [
+                    "diagnosticEvent": "custom.watchTransportFallback",
+                    "reason": "mirrorDisconnected"
+                ],
                 preferMirroring: false
             )
         }

@@ -1240,6 +1240,58 @@ struct SleepDetectionPOCTests {
         }))
     }
 
+    @Test("LiveWatchProvider keeps workout running when transport falls back")
+    func liveWatchProviderKeepsWorkoutRunningWhenTransportFallsBack() throws {
+        let provider = LiveWatchProvider(systemTransportEnabled: false)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+
+        try provider.start(session: session)
+
+        provider.debugInject(
+            status: WatchRuntimeStatusPayload(
+                sessionId: session.sessionId,
+                state: .workoutStarted,
+                occurredAt: start.addingTimeInterval(60),
+                transportMode: .bootstrap,
+                lastError: nil
+            ),
+            transportMode: .wcSessionFallback
+        )
+
+        provider.debugInject(
+            status: WatchRuntimeStatusPayload(
+                sessionId: session.sessionId,
+                state: .workoutStarted,
+                occurredAt: start.addingTimeInterval(61),
+                transportMode: .wcSessionFallback,
+                lastError: "Another session is starting",
+                details: [
+                    "diagnosticEvent": "custom.watchTransportFallback",
+                    "reason": "mirroringStartFailed"
+                ]
+            ),
+            transportMode: .wcSessionFallback
+        )
+
+        let snapshot = provider.runtimeSnapshot()
+        #expect(snapshot.runtimeState == .workoutStarted)
+        #expect(snapshot.transportMode == .wcSessionFallback)
+        #expect(snapshot.lastError == "Another session is starting")
+
+        let diagnosticEvents = provider.drainDiagnostics().map(\.event)
+        #expect(diagnosticEvents.contains(where: {
+            $0.eventType == "custom.watchTransportFallback" &&
+            $0.payload["reason"] == "mirroringStartFailed"
+        }))
+        #expect(!diagnosticEvents.contains(where: { $0.eventType == "custom.watchWorkoutFailed" }))
+    }
+
     @Test("AppModel emits watch startup timeout diagnostics for no ACK and no first packet")
     @MainActor
     func appModelWatchStartupTimeoutDiagnostics() async throws {
@@ -1358,6 +1410,59 @@ struct SleepDetectionPOCTests {
         )
 
         #expect(capturedEvents.filter { $0.eventType == "custom.watchStartupTimeout" }.isEmpty)
+    }
+
+    @Test("AppModel emits transport fallback without misclassifying workout failure")
+    @MainActor
+    func appModelEmitsTransportFallbackWithoutWorkoutFailure() async throws {
+        let model = AppModel(watchProvider: PlaceholderWatchProvider())
+        model.eventBus.reset()
+
+        var capturedEvents: [RouteEvent] = []
+        let token = model.eventBus.subscribe { capturedEvents.append($0) }
+        defer {
+            model.eventBus.unsubscribe(token)
+            model.eventBus.reset()
+        }
+
+        let startedSnapshot = WatchRuntimeSnapshot(
+            isSupported: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: false,
+            activationState: .activated,
+            runtimeState: .workoutStarted,
+            transportMode: .bootstrap,
+            lastCommandAt: Date(timeIntervalSince1970: 1_712_665_200),
+            lastAckAt: Date(timeIntervalSince1970: 1_712_665_201),
+            lastWindowAt: nil,
+            lastError: nil,
+            pendingWindowCount: 0
+        )
+        model.debugApplyWatchRuntimeSnapshot(startedSnapshot)
+
+        model.debugApplyWatchRuntimeSnapshot(
+            WatchRuntimeSnapshot(
+                isSupported: true,
+                isPaired: true,
+                isWatchAppInstalled: true,
+                isReachable: false,
+                activationState: .activated,
+                runtimeState: .workoutStarted,
+                transportMode: .wcSessionFallback,
+                lastCommandAt: startedSnapshot.lastCommandAt,
+                lastAckAt: startedSnapshot.lastAckAt,
+                lastWindowAt: nil,
+                lastError: "Another session is starting",
+                pendingWindowCount: 0
+            )
+        )
+
+        #expect(capturedEvents.contains(where: {
+            $0.eventType == "custom.watchTransportFallback" &&
+            $0.payload["lastError"] == "Another session is starting"
+        }))
+        #expect(!capturedEvents.contains(where: { $0.eventType == "custom.watchWorkoutFailed" }))
     }
 
     @Test("AppModel persists watch setup completion when watch becomes ready")
