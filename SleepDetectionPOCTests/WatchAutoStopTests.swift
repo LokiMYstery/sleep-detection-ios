@@ -102,6 +102,7 @@ private final class AutoStopRecordingWatchProvider: WatchProvider, @unchecked Se
 
     func start(session: Session) throws {}
     func prepareRuntime(sessionId: UUID) throws {}
+    func refreshDesiredRuntimeLease() {}
 
     func stop() {
         stopCallCount += 1

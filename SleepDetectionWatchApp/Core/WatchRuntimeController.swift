@@ -16,6 +16,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
 
     private struct PersistedRuntimeContext: Codable {
         var currentCommand: WatchSyncCommand?
+        var currentDesiredRuntime: WatchDesiredRuntimePayload?
         var activeSessionId: UUID?
         var runtimeState: WatchRuntimeSnapshot.RuntimeState
         var transportMode: WatchRuntimeSnapshot.TransportMode
@@ -46,6 +47,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
 
     private var hasActivated = false
     private var currentCommand: WatchSyncCommand?
+    private var currentDesiredRuntime: WatchDesiredRuntimePayload?
     private var nextWindowId = 0
     private var lastEmittedEndTime: Date?
     private var queryAnchor: HKQueryAnchor?
@@ -53,6 +55,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
     private var heartRateSamples: [WatchWindowPayload.HRSample] = []
     private var queuedEnvelopes: [WatchTransportEnvelope] = []
     private var extractionTask: Task<Void, Never>?
+    private var desiredRuntimeLeaseTask: Task<Void, Never>?
     private var deferredStartCommand: WatchSyncCommand?
     private var isWaitingForWorkoutShutdown = false
     private var workoutSession: HKWorkoutSession?
@@ -70,6 +73,9 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         hasActivated = true
         log("activateIfNeeded: configuring WCSession + HealthKit")
         restorePersistedRuntimeContextIfPresent()
+        if let currentDesiredRuntime {
+            scheduleDesiredRuntimeLeaseMonitor(for: currentDesiredRuntime)
+        }
         session?.delegate = self
         session?.activate()
         recoverActiveWorkoutSessionIfNeeded(reason: "activateIfNeeded")
@@ -114,6 +120,107 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         }
     }
 
+    private func handleDesiredRuntime(_ desiredRuntime: WatchDesiredRuntimePayload) {
+        if let currentDesiredRuntime, desiredRuntime.revision < currentDesiredRuntime.revision {
+            log("handleDesiredRuntime: ignored stale revision=\(desiredRuntime.revision) current=\(currentDesiredRuntime.revision)")
+            sendRuntimeStatus(
+                currentRuntimeState,
+                transportMode: currentTransportMode,
+                lastError: lastRuntimeErrorMessage,
+                preferMirroring: currentTransportMode == .mirroredWorkoutSession,
+                updateLocalState: false
+            )
+            return
+        }
+
+        let previousDesiredRuntime = currentDesiredRuntime
+        currentDesiredRuntime = desiredRuntime
+        activeSessionId = desiredRuntime.sessionId ?? activeSessionId
+        persistRuntimeContext()
+        scheduleDesiredRuntimeLeaseMonitor(for: desiredRuntime)
+
+        if let previousDesiredRuntime,
+           isEquivalentDesiredRuntime(previousDesiredRuntime, desiredRuntime) {
+            log("handleDesiredRuntime: refreshed lease revision=\(desiredRuntime.revision) mode=\(desiredRuntime.mode.rawValue)")
+            sendRuntimeStatus(
+                currentRuntimeState,
+                transportMode: currentTransportMode,
+                lastError: lastRuntimeErrorMessage,
+                preferMirroring: currentTransportMode == .mirroredWorkoutSession,
+                updateLocalState: false
+            )
+            return
+        }
+
+        switch desiredRuntime.mode {
+        case .idle:
+            stopSession()
+        case .prepared:
+            guard let command = synthesizedCommand(kind: .prepareRuntime, from: desiredRuntime) else {
+                log("handleDesiredRuntime: prepared missing session id")
+                return
+            }
+            prepareRuntime(with: command)
+        case .recording:
+            guard let command = synthesizedCommand(kind: .startSession, from: desiredRuntime) else {
+                log("handleDesiredRuntime: recording missing session id")
+                return
+            }
+            startSession(with: command)
+        }
+    }
+
+    private func isEquivalentDesiredRuntime(
+        _ lhs: WatchDesiredRuntimePayload,
+        _ rhs: WatchDesiredRuntimePayload
+    ) -> Bool {
+        lhs.mode == rhs.mode &&
+        lhs.sessionId == rhs.sessionId &&
+        lhs.sessionStartTime == rhs.sessionStartTime &&
+        lhs.sessionDuration == rhs.sessionDuration &&
+        lhs.preferredWindowDuration == rhs.preferredWindowDuration
+    }
+
+    private func scheduleDesiredRuntimeLeaseMonitor(for desiredRuntime: WatchDesiredRuntimePayload) {
+        desiredRuntimeLeaseTask?.cancel()
+        guard desiredRuntime.mode != .idle else {
+            desiredRuntimeLeaseTask = nil
+            return
+        }
+
+        desiredRuntimeLeaseTask = Task { [weak self] in
+            let delay = max(desiredRuntime.leaseExpiresAt.timeIntervalSinceNow, 0)
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            await MainActor.run {
+                guard let self else { return }
+                guard self.currentDesiredRuntime?.revision == desiredRuntime.revision else { return }
+                guard desiredRuntime.leaseExpiresAt <= Date() else { return }
+                self.log("scheduleDesiredRuntimeLeaseMonitor: expired revision=\(desiredRuntime.revision)")
+                self.sendDiagnosticStatusEvent(
+                    "custom.watchLeaseExpired",
+                    details: [
+                        "revision": "\(desiredRuntime.revision)",
+                        "mode": desiredRuntime.mode.rawValue
+                    ],
+                    preferMirroring: false
+                )
+                self.currentDesiredRuntime = WatchDesiredRuntimePayload(
+                    mode: .idle,
+                    revision: desiredRuntime.revision,
+                    sessionId: desiredRuntime.sessionId,
+                    sessionStartTime: desiredRuntime.sessionStartTime,
+                    requestedAt: Date(),
+                    leaseExpiresAt: Date(),
+                    sessionDuration: 0,
+                    preferredWindowDuration: 0
+                )
+                self.stopSession()
+            }
+        }
+    }
+
     func handle(workoutConfiguration: HKWorkoutConfiguration) {
         log(
             "handleWorkoutConfiguration: activityType=\(workoutConfiguration.activityType.rawValue) locationType=\(workoutConfiguration.locationType.rawValue)"
@@ -141,6 +248,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         do {
             let context = try JSONDecoder.iso8601.decode(PersistedRuntimeContext.self, from: data)
             currentCommand = context.currentCommand
+            currentDesiredRuntime = context.currentDesiredRuntime
             activeSessionId = context.activeSessionId ?? context.currentCommand?.sessionId
             currentRuntimeState = context.runtimeState
             currentTransportMode = context.transportMode
@@ -163,6 +271,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
     private func persistRuntimeContext() {
         let context = PersistedRuntimeContext(
             currentCommand: currentCommand,
+            currentDesiredRuntime: currentDesiredRuntime,
             activeSessionId: activeSessionId,
             runtimeState: currentRuntimeState,
             transportMode: currentTransportMode,
@@ -176,6 +285,7 @@ final class WatchRuntimeController: NSObject, ObservableObject {
 
         let shouldClearPersistedContext =
             context.currentCommand == nil &&
+            context.currentDesiredRuntime == nil &&
             context.activeSessionId == nil &&
             context.runtimeState == .idle &&
             context.transportMode == .idle &&
@@ -225,6 +335,22 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         case .stopped:
             return "Idle"
         }
+    }
+
+    private func synthesizedCommand(
+        kind: WatchSyncCommand.Command,
+        from desiredRuntime: WatchDesiredRuntimePayload
+    ) -> WatchSyncCommand? {
+        guard let sessionId = desiredRuntime.sessionId else { return nil }
+        let sessionStartTime = desiredRuntime.sessionStartTime ?? Date()
+        return WatchSyncCommand(
+            command: kind,
+            sessionId: sessionId,
+            sessionStartTime: sessionStartTime,
+            requestedAt: desiredRuntime.requestedAt,
+            sessionDuration: desiredRuntime.sessionDuration,
+            preferredWindowDuration: desiredRuntime.preferredWindowDuration
+        )
     }
 
     private func canRequestHealthAuthorizationInteractively() -> Bool {
@@ -670,6 +796,11 @@ final class WatchRuntimeController: NSObject, ObservableObject {
         latestHeartRate = nil
         lastPayloadTime = nil
         lastWindowSummary = nil
+        if currentDesiredRuntime?.mode == .idle {
+            currentDesiredRuntime = nil
+            desiredRuntimeLeaseTask?.cancel()
+            desiredRuntimeLeaseTask = nil
+        }
         status = "Idle"
         persistRuntimeContext()
         refreshConnectivity()
@@ -887,6 +1018,8 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             occurredAt: Date(),
             transportMode: transportMode,
             lastError: lastError,
+            ackedRevision: currentDesiredRuntime?.revision,
+            leaseExpiresAt: currentDesiredRuntime?.leaseExpiresAt,
             details: details
         )
         transmit(
@@ -1155,6 +1288,9 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             case .stopSession:
                 stopSession()
             }
+        case .desiredRuntime:
+            guard let desiredRuntime = envelope.desiredRuntime else { return }
+            handleDesiredRuntime(desiredRuntime)
         case .status, .window:
             break
         }

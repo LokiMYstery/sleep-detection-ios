@@ -1028,6 +1028,53 @@ struct SleepDetectionPOCTests {
         #expect(payload.effectiveMotionSignalVersion == .rawMagnitudeV0)
     }
 
+    @Test("Watch desired runtime envelope round-trips through transport encoding")
+    func watchDesiredRuntimeEnvelopeRoundTrip() throws {
+        let desiredRuntime = WatchDesiredRuntimePayload(
+            mode: .recording,
+            revision: 7,
+            sessionId: UUID(uuidString: "00000000-0000-0000-0000-000000000007"),
+            sessionStartTime: Date(timeIntervalSince1970: 1_712_665_200),
+            requestedAt: Date(timeIntervalSince1970: 1_712_665_260),
+            leaseExpiresAt: Date(timeIntervalSince1970: 1_712_665_290),
+            sessionDuration: 600,
+            preferredWindowDuration: 60
+        )
+
+        let envelope = WatchTransportEnvelope.desiredRuntimeEnvelope(desiredRuntime)
+        let decoded = try WatchTransportEnvelope.decode(data: envelope.encodedData())
+
+        #expect(decoded.kind == .desiredRuntime)
+        #expect(decoded.desiredRuntime == desiredRuntime)
+        #expect(decoded.command == nil)
+    }
+
+    @Test("Watch runtime snapshot event payload preserves desired-runtime metadata")
+    func watchRuntimeSnapshotEventPayloadPreservesDesiredRuntimeMetadata() throws {
+        let snapshot = WatchRuntimeSnapshot(
+            isSupported: true,
+            isPaired: true,
+            isWatchAppInstalled: true,
+            isReachable: false,
+            activationState: .activated,
+            runtimeState: .workoutStarted,
+            transportMode: .wcSessionFallback,
+            lastCommandAt: Date(timeIntervalSince1970: 1_712_665_200),
+            lastAckAt: Date(timeIntervalSince1970: 1_712_665_201),
+            lastWindowAt: nil,
+            lastError: nil,
+            pendingWindowCount: 0,
+            activeSessionId: UUID(uuidString: "00000000-0000-0000-0000-000000000001"),
+            ackedRevision: 11,
+            leaseExpiresAt: Date(timeIntervalSince1970: 1_712_665_260)
+        )
+
+        let decoded = try #require(WatchRuntimeSnapshot(eventPayload: snapshot.eventPayload))
+        #expect(decoded.activeSessionId == snapshot.activeSessionId)
+        #expect(decoded.ackedRevision == 11)
+        #expect(decoded.leaseExpiresAt == snapshot.leaseExpiresAt)
+    }
+
     @Test("LiveWatchProvider keeps the start command pending until ACK arrives")
     func liveWatchProviderPendingCommandLifecycle() throws {
         let provider = LiveWatchProvider(systemTransportEnabled: false)
@@ -1312,6 +1359,31 @@ struct SleepDetectionPOCTests {
         #expect(provider.runtimeSnapshot().runtimeState == .workoutStarted)
         provider.stop()
         #expect(provider.runtimeSnapshot().runtimeState == .stopped)
+    }
+
+    @Test("LiveWatchProvider stores desired-runtime acknowledgements from watch status")
+    func liveWatchProviderStoresDesiredRuntimeAcknowledgements() {
+        let provider = LiveWatchProvider(systemTransportEnabled: false)
+        let sessionId = UUID()
+        let leaseExpiry = Date(timeIntervalSince1970: 1_712_665_260)
+
+        provider.debugInject(
+            status: WatchRuntimeStatusPayload(
+                sessionId: sessionId,
+                state: .workoutStarted,
+                occurredAt: Date(timeIntervalSince1970: 1_712_665_220),
+                transportMode: .wcSessionFallback,
+                lastError: nil,
+                ackedRevision: 9,
+                leaseExpiresAt: leaseExpiry
+            ),
+            transportMode: .wcSessionFallback
+        )
+
+        let snapshot = provider.runtimeSnapshot()
+        #expect(snapshot.activeSessionId == sessionId)
+        #expect(snapshot.ackedRevision == 9)
+        #expect(snapshot.leaseExpiresAt == leaseExpiry)
     }
 
     @Test("AppModel emits watch startup timeout diagnostics for no ACK and no first packet")
@@ -2095,6 +2167,7 @@ private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {
     }
 
     func prepareRuntime(sessionId: UUID) throws {}
+    func refreshDesiredRuntimeLease() {}
     func stop() {
         stopCallCount += 1
         snapshot.runtimeState = .stopped

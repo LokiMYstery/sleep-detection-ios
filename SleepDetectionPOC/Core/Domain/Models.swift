@@ -793,6 +793,23 @@ enum WatchSetupState: String, Codable, Equatable, Sendable {
     case ready = "Ready"
 }
 
+struct WatchDesiredRuntimePayload: Codable, Equatable, Sendable {
+    enum Mode: String, Codable, Sendable {
+        case idle
+        case prepared
+        case recording
+    }
+
+    var mode: Mode
+    var revision: Int
+    var sessionId: UUID?
+    var sessionStartTime: Date?
+    var requestedAt: Date
+    var leaseExpiresAt: Date
+    var sessionDuration: TimeInterval
+    var preferredWindowDuration: TimeInterval
+}
+
 struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
     enum ActivationState: String, Codable, Sendable {
         case notActivated
@@ -832,6 +849,9 @@ struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
     var lastWindowAt: Date?
     var lastError: String?
     var pendingWindowCount: Int
+    var activeSessionId: UUID? = nil
+    var ackedRevision: Int? = nil
+    var leaseExpiresAt: Date? = nil
 
     static let unavailable = WatchRuntimeSnapshot(
         isSupported: false,
@@ -845,7 +865,10 @@ struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
         lastAckAt: nil,
         lastWindowAt: nil,
         lastError: nil,
-        pendingWindowCount: 0
+        pendingWindowCount: 0,
+        activeSessionId: nil,
+        ackedRevision: nil,
+        leaseExpiresAt: nil
     )
 
     init(
@@ -860,7 +883,10 @@ struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
         lastAckAt: Date?,
         lastWindowAt: Date?,
         lastError: String?,
-        pendingWindowCount: Int
+        pendingWindowCount: Int,
+        activeSessionId: UUID? = nil,
+        ackedRevision: Int? = nil,
+        leaseExpiresAt: Date? = nil
     ) {
         self.isSupported = isSupported
         self.isPaired = isPaired
@@ -874,6 +900,9 @@ struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
         self.lastWindowAt = lastWindowAt
         self.lastError = lastError
         self.pendingWindowCount = pendingWindowCount
+        self.activeSessionId = activeSessionId
+        self.ackedRevision = ackedRevision
+        self.leaseExpiresAt = leaseExpiresAt
     }
 
     init?(eventPayload: [String: String]) {
@@ -905,7 +934,10 @@ struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
             lastAckAt: Self.parseDate(eventPayload["lastAckAt"]),
             lastWindowAt: Self.parseDate(eventPayload["lastWindowAt"]),
             lastError: eventPayload["lastError"].flatMap { $0.isEmpty ? nil : $0 },
-            pendingWindowCount: pendingWindowCount
+            pendingWindowCount: pendingWindowCount,
+            activeSessionId: eventPayload["activeSessionId"].flatMap(UUID.init(uuidString:)),
+            ackedRevision: Int(eventPayload["ackedRevision"] ?? ""),
+            leaseExpiresAt: Self.parseDate(eventPayload["leaseExpiresAt"])
         )
     }
 
@@ -922,7 +954,10 @@ struct WatchRuntimeSnapshot: Codable, Equatable, Sendable {
             "lastAckAt": Self.formatDate(lastAckAt),
             "lastWindowAt": Self.formatDate(lastWindowAt),
             "lastError": lastError ?? "",
-            "pendingWindowCount": "\(pendingWindowCount)"
+            "pendingWindowCount": "\(pendingWindowCount)",
+            "activeSessionId": activeSessionId?.uuidString ?? "",
+            "ackedRevision": ackedRevision.map(String.init) ?? "",
+            "leaseExpiresAt": Self.formatDate(leaseExpiresAt)
         ]
     }
 
@@ -952,11 +987,14 @@ struct WatchRuntimeStatusPayload: Codable, Equatable, Sendable {
     var occurredAt: Date
     var transportMode: WatchRuntimeSnapshot.TransportMode
     var lastError: String?
+    var ackedRevision: Int? = nil
+    var leaseExpiresAt: Date? = nil
     var details: [String: String]? = nil
 }
 
 enum WatchTransportKind: String, Codable, Sendable {
     case command
+    case desiredRuntime
     case status
     case window
 }
@@ -964,19 +1002,24 @@ enum WatchTransportKind: String, Codable, Sendable {
 struct WatchTransportEnvelope: Codable, Equatable, Sendable {
     var kind: WatchTransportKind
     var command: WatchSyncCommand?
+    var desiredRuntime: WatchDesiredRuntimePayload?
     var status: WatchRuntimeStatusPayload?
     var window: WatchWindowPayload?
 
     static func commandEnvelope(_ command: WatchSyncCommand) -> WatchTransportEnvelope {
-        WatchTransportEnvelope(kind: .command, command: command, status: nil, window: nil)
+        WatchTransportEnvelope(kind: .command, command: command, desiredRuntime: nil, status: nil, window: nil)
+    }
+
+    static func desiredRuntimeEnvelope(_ desiredRuntime: WatchDesiredRuntimePayload) -> WatchTransportEnvelope {
+        WatchTransportEnvelope(kind: .desiredRuntime, command: nil, desiredRuntime: desiredRuntime, status: nil, window: nil)
     }
 
     static func statusEnvelope(_ status: WatchRuntimeStatusPayload) -> WatchTransportEnvelope {
-        WatchTransportEnvelope(kind: .status, command: nil, status: status, window: nil)
+        WatchTransportEnvelope(kind: .status, command: nil, desiredRuntime: nil, status: status, window: nil)
     }
 
     static func windowEnvelope(_ window: WatchWindowPayload) -> WatchTransportEnvelope {
-        WatchTransportEnvelope(kind: .window, command: nil, status: nil, window: window)
+        WatchTransportEnvelope(kind: .window, command: nil, desiredRuntime: nil, status: nil, window: window)
     }
 
     func encodedData() throws -> Data {
