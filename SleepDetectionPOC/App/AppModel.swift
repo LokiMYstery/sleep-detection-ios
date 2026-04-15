@@ -210,6 +210,7 @@ final class AppModel: ObservableObject {
 
         switch phase {
         case .active:
+            refreshWatchDesiredRuntimeLeaseIfNeeded()
             if currentSession != nil {
                 audioProvider.ensureRunning(reason: "scenePhase:\(phaseLabel)")
             }
@@ -463,6 +464,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
+                self.refreshWatchDesiredRuntimeLeaseIfNeeded()
                 await self.flushPendingWatchWindows()
             }
         }
@@ -767,6 +769,7 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
+                self.refreshWatchDesiredRuntimeLeaseIfNeeded()
                 if self.currentSession != nil {
                     await self.flushPendingWatchWindows()
                 } else {
@@ -1157,7 +1160,7 @@ final class AppModel: ObservableObject {
             return
         }
 
-        if previous != snapshot {
+        if normalizedWatchRuntimeSnapshot(previous) != normalizedWatchRuntimeSnapshot(snapshot) {
             postDiagnosticEvent("system.watchRuntimeSnapshot", payload: snapshot.eventPayload)
         }
 
@@ -1568,6 +1571,13 @@ final class AppModel: ObservableObject {
         watchStartCommandIssuedAt = nil
     }
 
+    private func normalizedWatchRuntimeSnapshot(_ snapshot: WatchRuntimeSnapshot?) -> WatchRuntimeSnapshot? {
+        guard var snapshot else { return nil }
+        snapshot.ackedRevision = nil
+        snapshot.leaseExpiresAt = nil
+        return snapshot
+    }
+
     private func drainWatchDiagnostics(recordEvents: Bool) {
         guard recordEvents else {
             _ = watchProvider.drainDiagnostics()
@@ -1588,6 +1598,11 @@ final class AppModel: ObservableObject {
         for diagnostic in passivePhysiologyProvider.drainDiagnostics() {
             eventBus.post(diagnostic)
         }
+    }
+
+    private func refreshWatchDesiredRuntimeLeaseIfNeeded() {
+        guard currentSession != nil || isPreparingWatch || pendingWatchSessionStart else { return }
+        watchProvider.refreshDesiredRuntimeLease()
     }
 
     private func syncWatchStartupFlags(with snapshot: WatchRuntimeSnapshot) {
@@ -1844,6 +1859,10 @@ extension AppModel {
 
     func debugBeginWatchRealtimeIfNeeded(for session: Session, recordEvents: Bool = true) {
         beginWatchRealtimeIfNeeded(for: session, recordEvents: recordEvents)
+    }
+
+    func debugRefreshWatchDesiredRuntimeLeaseIfNeeded() {
+        refreshWatchDesiredRuntimeLeaseIfNeeded()
     }
 
     func debugWatchSetupCompletedState() -> Bool {

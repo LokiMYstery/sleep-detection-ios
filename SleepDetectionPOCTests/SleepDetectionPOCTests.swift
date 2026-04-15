@@ -1111,6 +1111,43 @@ struct SleepDetectionPOCTests {
         #expect(snapshot.lastAckAt == ackTime)
     }
 
+    @Test("LiveWatchProvider publishes desired runtime for start, renewal, and stop")
+    func liveWatchProviderPublishesDesiredRuntimeLifecycle() throws {
+        let provider = LiveWatchProvider(systemTransportEnabled: false)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+
+        try provider.start(session: session)
+
+        let initialDesiredRuntime = try #require(provider.debugDesiredRuntime())
+        #expect(initialDesiredRuntime.mode == .recording)
+        #expect(initialDesiredRuntime.sessionId == session.sessionId)
+        #expect(provider.debugPendingCommand()?.command == .startSession)
+
+        let lastCommandAt = provider.runtimeSnapshot().lastCommandAt
+        provider.refreshDesiredRuntimeLease()
+
+        let renewedDesiredRuntime = try #require(provider.debugDesiredRuntime())
+        #expect(renewedDesiredRuntime.mode == .recording)
+        #expect(renewedDesiredRuntime.sessionId == session.sessionId)
+        #expect(renewedDesiredRuntime.revision == initialDesiredRuntime.revision + 1)
+        #expect(renewedDesiredRuntime.leaseExpiresAt > initialDesiredRuntime.leaseExpiresAt)
+        #expect(provider.runtimeSnapshot().lastCommandAt == lastCommandAt)
+
+        provider.stop()
+
+        let idleDesiredRuntime = try #require(provider.debugDesiredRuntime())
+        #expect(idleDesiredRuntime.mode == .idle)
+        #expect(idleDesiredRuntime.sessionId == session.sessionId)
+        #expect(idleDesiredRuntime.revision == renewedDesiredRuntime.revision + 1)
+        #expect(provider.runtimeSnapshot().runtimeState == .stopped)
+    }
+
     @Test("LiveWatchProvider tracks prepareRuntime until watch reports ready")
     func liveWatchProviderPrepareRuntimeLifecycle() throws {
         let provider = LiveWatchProvider(systemTransportEnabled: false)
@@ -1583,6 +1620,34 @@ struct SleepDetectionPOCTests {
         )
 
         #expect(watchProvider.stopCallCount == 1)
+    }
+
+    @Test("AppModel refreshes desired watch lease while setup or recording is active")
+    @MainActor
+    func appModelRefreshesDesiredWatchLeaseWhenWatchFlowIsActive() {
+        let session = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_712_665_200),
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+
+        let idleProvider = RecordingWatchProvider()
+        let idleModel = AppModel(watchProvider: idleProvider)
+        idleModel.debugRefreshWatchDesiredRuntimeLeaseIfNeeded()
+        #expect(idleProvider.refreshDesiredRuntimeLeaseCallCount == 0)
+
+        let preparingProvider = RecordingWatchProvider()
+        let preparingModel = AppModel(watchProvider: preparingProvider)
+        preparingModel.debugPreparePendingWatchSessionStart(for: session)
+        preparingModel.debugRefreshWatchDesiredRuntimeLeaseIfNeeded()
+        #expect(preparingProvider.refreshDesiredRuntimeLeaseCallCount == 1)
+
+        let activeProvider = RecordingWatchProvider()
+        let activeModel = AppModel(watchProvider: activeProvider)
+        activeModel.debugPrepareWatchStartupTracking(for: session)
+        activeModel.debugRefreshWatchDesiredRuntimeLeaseIfNeeded()
+        #expect(activeProvider.refreshDesiredRuntimeLeaseCallCount == 1)
     }
 
     @Test("AppModel persists watch setup completion when watch becomes ready")
@@ -2160,6 +2225,7 @@ private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {
     )
     private(set) var startedSessionIds: [UUID] = []
     private(set) var stopCallCount = 0
+    private(set) var refreshDesiredRuntimeLeaseCallCount = 0
 
     func start(session: Session) throws {
         startedSessionIds.append(session.sessionId)
@@ -2167,7 +2233,9 @@ private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {
     }
 
     func prepareRuntime(sessionId: UUID) throws {}
-    func refreshDesiredRuntimeLease() {}
+    func refreshDesiredRuntimeLease() {
+        refreshDesiredRuntimeLeaseCallCount += 1
+    }
     func stop() {
         stopCallCount += 1
         snapshot.runtimeState = .stopped

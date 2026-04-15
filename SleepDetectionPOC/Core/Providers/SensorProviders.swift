@@ -188,10 +188,18 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     }
 
     func start(session: Session) throws {
+        let desiredRuntime = nextDesiredRuntime(
+            mode: .recording,
+            sessionId: session.sessionId,
+            sessionStartTime: session.startTime,
+            sessionDuration: 12 * 60 * 60,
+            preferredWindowDuration: 60
+        )
         let command = makeCommand(
             kind: .startSession,
             sessionId: session.sessionId,
-            sessionStartTime: session.startTime
+            sessionStartTime: session.startTime,
+            requestedAt: desiredRuntime.requestedAt
         )
 
         appendDiagnostic(
@@ -200,12 +208,14 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             extra: [
                 "sessionId": session.sessionId.uuidString,
                 "sessionStartTime": session.startTime.ISO8601Format(),
-                "preferredWindowDurationSec": "\(Int(command.preferredWindowDuration))"
+                "preferredWindowDurationSec": "\(Int(command.preferredWindowDuration))",
+                "desiredRevision": "\(desiredRuntime.revision)"
             ]
         )
 
         protectedState.write { state in
             state.activeSessionId = session.sessionId
+            state.desiredRuntime = desiredRuntime
             state.pendingWindows.removeAll()
             state.deliveredWindowKeys.removeAll()
             state.heartRateSamples.removeAll()
@@ -213,14 +223,14 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             state.pendingCommand = command
             state.currentRuntime.runtimeState = .launchRequested
             state.currentRuntime.transportMode = .bootstrap
-            state.currentRuntime.lastCommandAt = command.requestedAt
+            state.currentRuntime.lastCommandAt = desiredRuntime.requestedAt
             state.currentRuntime.lastAckAt = nil
             state.currentRuntime.lastWindowAt = nil
             state.currentRuntime.lastError = nil
             state.currentRuntime.pendingWindowCount = 0
             state.currentRuntime.activeSessionId = session.sessionId
             state.currentRuntime.ackedRevision = nil
-            state.currentRuntime.leaseExpiresAt = state.desiredRuntime?.leaseExpiresAt
+            state.currentRuntime.leaseExpiresAt = desiredRuntime.leaseExpiresAt
         }
         #if canImport(HealthKit)
         mirroredSession.write { $0 = nil }
@@ -230,42 +240,52 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
         self.session?.activate()
         refreshRuntimeSnapshot()
         launchWatchAppForWorkout()
-        transmit(command: command)
+        transmit(desiredRuntime: desiredRuntime)
     }
 
     func prepareRuntime(sessionId: UUID) throws {
+        let desiredRuntime = nextDesiredRuntime(
+            mode: .prepared,
+            sessionId: sessionId,
+            sessionStartTime: nil,
+            sessionDuration: 0,
+            preferredWindowDuration: 0
+        )
         let command = makeCommand(
             kind: .prepareRuntime,
             sessionId: sessionId,
-            sessionStartTime: Date()
+            sessionStartTime: desiredRuntime.requestedAt,
+            requestedAt: desiredRuntime.requestedAt
         )
 
         appendDiagnostic(
             stage: "provider.prepare",
             message: "Preparing watch runtime before realtime collection",
             extra: [
-                "sessionId": sessionId.uuidString
+                "sessionId": sessionId.uuidString,
+                "desiredRevision": "\(desiredRuntime.revision)"
             ]
         )
 
         protectedState.write { state in
             state.activeSessionId = sessionId
+            state.desiredRuntime = desiredRuntime
             state.pendingCommand = command
             state.currentRuntime.runtimeState = .launchRequested
             state.currentRuntime.transportMode = .bootstrap
-            state.currentRuntime.lastCommandAt = command.requestedAt
+            state.currentRuntime.lastCommandAt = desiredRuntime.requestedAt
             state.currentRuntime.lastAckAt = nil
             state.currentRuntime.lastError = nil
             state.currentRuntime.activeSessionId = sessionId
             state.currentRuntime.ackedRevision = nil
-            state.currentRuntime.leaseExpiresAt = state.desiredRuntime?.leaseExpiresAt
+            state.currentRuntime.leaseExpiresAt = desiredRuntime.leaseExpiresAt
         }
 
         self.session?.delegate = self
         self.session?.activate()
         refreshRuntimeSnapshot()
         launchWatchAppForWorkout()
-        transmit(command: command)
+        transmit(desiredRuntime: desiredRuntime)
     }
 
     func stop() {
@@ -290,24 +310,24 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
             ]
         )
 
-        let command = WatchSyncCommand(
-            command: .stopSession,
+        let desiredRuntime = nextDesiredRuntime(
+            mode: .idle,
             sessionId: currentSessionId,
-            sessionStartTime: Date(),
-            requestedAt: Date(),
+            sessionStartTime: nil,
             sessionDuration: 0,
             preferredWindowDuration: 0
         )
         protectedState.write { state in
+            state.desiredRuntime = desiredRuntime
             state.pendingCommand = nil
             state.currentRuntime.runtimeState = .stopped
             state.currentRuntime.transportMode = .bootstrap
-            state.currentRuntime.lastCommandAt = command.requestedAt
+            state.currentRuntime.lastCommandAt = desiredRuntime.requestedAt
             state.currentRuntime.lastError = nil
             state.currentRuntime.activeSessionId = state.activeSessionId
-            state.currentRuntime.leaseExpiresAt = state.desiredRuntime?.leaseExpiresAt
+            state.currentRuntime.leaseExpiresAt = desiredRuntime.leaseExpiresAt
         }
-        transmit(command: command)
+        transmit(desiredRuntime: desiredRuntime)
         #if canImport(HealthKit)
         mirroredSession.write { $0 = nil }
         #endif
@@ -403,14 +423,14 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
     private func makeCommand(
         kind: WatchSyncCommand.Command,
         sessionId: UUID,
-        sessionStartTime: Date
+        sessionStartTime: Date,
+        requestedAt: Date = Date()
     ) -> WatchSyncCommand {
-        let requestTime = Date()
         return WatchSyncCommand(
             command: kind,
             sessionId: sessionId,
             sessionStartTime: sessionStartTime,
-            requestedAt: requestTime,
+            requestedAt: requestedAt,
             sessionDuration: kind == .startSession ? 12 * 60 * 60 : 0,
             preferredWindowDuration: kind == .startSession ? 60 : 0
         )
@@ -588,7 +608,15 @@ final class LiveWatchProvider: NSObject, WatchProvider, @unchecked Sendable {
                 }
             }
 
-            let shouldQueueTransferUserInfo = envelope.kind != .command || !session.isReachable
+            let shouldQueueTransferUserInfo: Bool
+            switch envelope.kind {
+            case .command:
+                shouldQueueTransferUserInfo = !session.isReachable
+            case .desiredRuntime:
+                shouldQueueTransferUserInfo = false
+            case .status, .window:
+                shouldQueueTransferUserInfo = true
+            }
             if shouldQueueTransferUserInfo {
                 let transfer = session.transferUserInfo(message)
                 if envelope.kind == .command {
@@ -1174,6 +1202,10 @@ extension LiveWatchProvider: HKWorkoutSessionDelegate {
 extension LiveWatchProvider {
     func debugPendingCommand() -> WatchSyncCommand? {
         protectedState.withLock { $0.pendingCommand }
+    }
+
+    func debugDesiredRuntime() -> WatchDesiredRuntimePayload? {
+        protectedState.read { $0.desiredRuntime }
     }
 
     func debugInject(status: WatchRuntimeStatusPayload, transportMode: WatchRuntimeSnapshot.TransportMode = .wcSessionFallback) {
