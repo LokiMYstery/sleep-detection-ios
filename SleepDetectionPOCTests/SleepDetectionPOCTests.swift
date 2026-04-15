@@ -1650,6 +1650,31 @@ struct SleepDetectionPOCTests {
         #expect(activeProvider.refreshDesiredRuntimeLeaseCallCount == 1)
     }
 
+    @Test("AppModel surfaces manual watch permission recovery guidance")
+    @MainActor
+    func appModelSurfacesManualWatchPermissionRecoveryGuidance() {
+        let model = AppModel(watchProvider: PlaceholderWatchProvider())
+
+        model.debugApplyWatchRuntimeSnapshot(
+            WatchRuntimeSnapshot(
+                isSupported: true,
+                isPaired: true,
+                isWatchAppInstalled: true,
+                isReachable: false,
+                activationState: .activated,
+                runtimeState: .authorizationRequired,
+                transportMode: .bootstrap,
+                lastCommandAt: Date(timeIntervalSince1970: 1_712_665_200),
+                lastAckAt: nil,
+                lastWindowAt: nil,
+                lastError: WatchAuthorizationMessages.manualPermissionRecovery,
+                pendingWindowCount: 0
+            )
+        )
+
+        #expect(model.watchSetupGuidance == WatchAuthorizationMessages.manualPermissionRecovery)
+    }
+
     @Test("AppModel persists watch setup completion when watch becomes ready")
     @MainActor
     func appModelPersistsWatchSetupCompletion() async throws {

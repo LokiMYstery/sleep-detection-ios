@@ -66,7 +66,8 @@ final class WatchRuntimeController: NSObject, ObservableObject {
     private var lastRuntimeErrorMessage: String?
     private var hasAttemptedWorkoutRecovery = false
 
-    private let authorizationRequiredMessage = "HealthKit authorization required on watch."
+    private let authorizationRequiredMessage = WatchAuthorizationMessages.authorizationRequired
+    private let manualAuthorizationRecoveryMessage = WatchAuthorizationMessages.manualPermissionRecovery
 
     func activateIfNeeded() {
         guard !hasActivated else { return }
@@ -480,12 +481,61 @@ final class WatchRuntimeController: NSObject, ObservableObject {
             log("requestHealthAuthorizationIfNeeded: skipped because app is not active")
             return
         }
-        guard let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) else { return }
+        guard let authorizationTypes = makeHealthAuthorizationTypes() else { return }
 
-        let workoutType = HKObjectType.workoutType()
+        setHealthAuthorizationState(.requesting, reason: "Checking if HealthKit permission sheet should be shown")
+        log("requestHealthAuthorizationIfNeeded: checking authorization request status")
+        healthStore.getRequestStatusForAuthorization(
+            toShare: authorizationTypes.shareTypes,
+            read: authorizationTypes.readTypes
+        ) { [weak self] requestStatus, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    self.log("requestHealthAuthorizationIfNeeded: request status failed error=\(error.localizedDescription)")
+                    self.performHealthAuthorizationRequest(with: authorizationTypes)
+                    return
+                }
+
+                switch requestStatus {
+                case .shouldRequest:
+                    self.performHealthAuthorizationRequest(with: authorizationTypes)
+                case .unnecessary:
+                    self.log("requestHealthAuthorizationIfNeeded: permission sheet unavailable; authorization already decided")
+                    let updatedState = self.refreshHealthAuthorizationState(requestIfNeeded: false)
+                    if updatedState == .authorized {
+                        self.continuePendingSessionAfterAuthorizationIfNeeded()
+                    } else if self.currentCommand != nil {
+                        self.reportAuthorizationRequired(reason: self.manualAuthorizationRecoveryMessage)
+                    }
+                case .unknown:
+                    self.log("requestHealthAuthorizationIfNeeded: request status unknown; falling back to requestAuthorization")
+                    self.performHealthAuthorizationRequest(with: authorizationTypes)
+                @unknown default:
+                    self.log("requestHealthAuthorizationIfNeeded: request status defaulted; falling back to requestAuthorization")
+                    self.performHealthAuthorizationRequest(with: authorizationTypes)
+                }
+            }
+        }
+    }
+
+    private func makeHealthAuthorizationTypes() -> (shareTypes: Set<HKSampleType>, readTypes: Set<HKObjectType>)? {
+        guard let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) else { return nil }
+        return (
+            shareTypes: [HKObjectType.workoutType()],
+            readTypes: [heartRateType]
+        )
+    }
+
+    private func performHealthAuthorizationRequest(
+        with authorizationTypes: (shareTypes: Set<HKSampleType>, readTypes: Set<HKObjectType>)
+    ) {
         setHealthAuthorizationState(.requesting, reason: "Requesting workout write + heart rate read")
         log("requestHealthAuthorizationIfNeeded: requesting workout write + heart rate read")
-        healthStore.requestAuthorization(toShare: [workoutType], read: [heartRateType]) { [weak self] success, error in
+        healthStore.requestAuthorization(
+            toShare: authorizationTypes.shareTypes,
+            read: authorizationTypes.readTypes
+        ) { [weak self] success, error in
             Task { @MainActor in
                 guard let self else { return }
                 let errorDescription = error?.localizedDescription ?? "nil"

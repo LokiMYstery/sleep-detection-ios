@@ -178,6 +178,9 @@ final class AppModel: ObservableObject {
             return "Install the watch companion from the iPhone Watch app once. After that, use Prepare Watch to finish authorization."
         case .authorizationRequired:
             if watchRuntimeSnapshot.runtimeState == .authorizationRequired {
+                if let lastError = watchRuntimeSnapshot.lastError, !lastError.isEmpty {
+                    return lastError
+                }
                 return "Open the watch app and approve Health access once. After authorization, future starts can be initiated from iPhone."
             }
             if isPreparingWatch {
@@ -1137,10 +1140,15 @@ final class AppModel: ObservableObject {
         syncWatchSetupCompletion(with: snapshot)
         requestOrphanWatchCleanupIfNeeded(snapshot, recordEvents: recordEvents)
 
-        if snapshot.runtimeState == .authorizationRequired {
+        if snapshot.runtimeState == .authorizationRequired &&
+            snapshot.lastError != WatchAuthorizationMessages.manualPermissionRecovery {
             isPreparingWatch = true
         }
         if isWatchReadyForRealtime(snapshot) || snapshot.runtimeState == .stopped {
+            isPreparingWatch = false
+        }
+        if snapshot.runtimeState == .authorizationRequired &&
+            snapshot.lastError == WatchAuthorizationMessages.manualPermissionRecovery {
             isPreparingWatch = false
         }
         if !snapshot.isPaired || !snapshot.isWatchAppInstalled {

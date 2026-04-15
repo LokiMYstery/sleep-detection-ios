@@ -793,6 +793,12 @@ enum WatchSetupState: String, Codable, Equatable, Sendable {
     case ready = "Ready"
 }
 
+enum WatchAuthorizationMessages {
+    static let authorizationRequired = "HealthKit authorization required on watch."
+    static let manualPermissionRecovery =
+        "Health access was already decided on Apple Watch. Open the Health app or Settings on Apple Watch to update Sleep Watch permissions."
+}
+
 struct WatchDesiredRuntimePayload: Codable, Equatable, Sendable {
     enum Mode: String, Codable, Sendable {
         case idle
