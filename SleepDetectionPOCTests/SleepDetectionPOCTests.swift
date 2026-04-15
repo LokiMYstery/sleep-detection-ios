@@ -273,58 +273,146 @@ struct SleepDetectionPOCTests {
         #expect(selected?.sourceBundle == "B")
     }
 
-    @Test("Route C confirms after sustained stillness")
+    @Test("Route C keeps onset separate from confirmedAt and does not reset on steady unlocked state")
     @MainActor
-    func routeCConfirmsAfterStillness() async throws {
-        var settings = ExperimentSettings.default
-        settings.routeCParameters = RouteCParameters(
-            stillnessThreshold: 0.01,
-            stillWindowThreshold: 2,
-            confirmWindowCount: 4,
-            significantMovementCooldownMinutes: 0,
-            activeThreshold: 0.08,
-            trendWindowSize: 4
-        )
-
-        let engine = RouteCEngine(settings: settings)
+    func routeCKeepsOnsetSeparateFromConfirmedAt() async throws {
+        let settings = routeCTestSettings()
+        let eventBus = EventBus()
+        let engine = RouteCEngine(settings: settings, eventBus: eventBus)
         let start = Date(timeIntervalSince1970: 1_712_665_200)
-        var session = Session.make(
-            startTime: start,
-            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: false, hasMotionAccess: true),
-            priorLevel: .P3,
-            enabledRoutes: RouteId.allCases
+        engine.start(session: routeCTestSession(start: start), priors: PriorSnapshot.empty.routePriors)
+        let steadyUnlockedInteraction = routeCTestInteraction(
+            at: start.addingTimeInterval(-120),
+            isLocked: false,
+            screenWakeCount: 0,
+            timeSinceLastInteraction: 120
         )
-        session.phonePlacement = PhonePlacement.bedSurface.rawValue
-        engine.start(session: session, priors: PriorSnapshot.empty.routePriors)
 
-        let rmsValues: [Double] = [0.06, 0.03, 0.008, 0.007, 0.006, 0.006]
-        for (index, rms) in rmsValues.enumerated() {
-            engine.onWindow(
-                FeatureWindow(
-                    windowId: index,
-                    startTime: start.addingTimeInterval(Double(index) * 30),
-                    endTime: start.addingTimeInterval(Double(index + 1) * 30),
-                    duration: 30,
-                    source: .iphone,
-                    motion: MotionFeatures(
-                        accelRMS: rms,
-                        peakCount: rms > 0.02 ? 2 : 0,
-                        attitudeChangeRate: 1,
-                        maxAccel: rms,
-                        stillRatio: rms < 0.01 ? 0.95 : 0.5,
-                        stillDuration: rms < 0.01 ? 28 : 10
-                    ),
-                    audio: nil,
-                    interaction: nil,
-                    watch: nil
-                )
-            )
-        }
+        engine.onWindow(routeCTestWindow(index: 0, start: start, motion: routeCTestMovementMotion(rms: 0.06, peakCount: 2), interaction: steadyUnlockedInteraction))
+        engine.onWindow(routeCTestWindow(index: 1, start: start, motion: routeCTestMovementMotion(rms: 0.03, peakCount: 2), interaction: steadyUnlockedInteraction))
+        engine.onWindow(routeCTestWindow(index: 2, start: start, motion: routeCTestStillMotion(rms: 0.008), interaction: steadyUnlockedInteraction))
+        engine.onWindow(routeCTestWindow(index: 3, start: start, motion: routeCTestStillMotion(rms: 0.007), interaction: steadyUnlockedInteraction))
+
+        let candidatePrediction = try #require(engine.currentPrediction())
+        #expect(candidatePrediction.confidence == .candidate)
+        #expect(candidatePrediction.predictedSleepOnset == nil)
+        #expect(candidatePrediction.confirmedAt == nil)
+
+        engine.onWindow(routeCTestWindow(index: 4, start: start, motion: routeCTestStillMotion(rms: 0.006), interaction: steadyUnlockedInteraction))
+        engine.onWindow(routeCTestWindow(index: 5, start: start, motion: routeCTestStillMotion(rms: 0.006), interaction: steadyUnlockedInteraction))
+
+        let prediction = try #require(engine.currentPrediction())
+        let expectedOnset = start.addingTimeInterval(60)
+        let expectedConfirmTime = start.addingTimeInterval(180)
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset == expectedOnset)
+        #expect(prediction.confirmedAt == expectedConfirmTime)
+        #expect(prediction.evidenceSummary.contains("Confirmed"))
+
+        let confirmedEvent = try #require(eventBus.recentEvents.first(where: { $0.routeId == .C && $0.eventType == "confirmedSleep" }))
+        #expect(confirmedEvent.payload["predictedTime"] == ISO8601DateFormatter.cached.string(from: expectedOnset))
+        #expect(confirmedEvent.payload["confirmedAt"] == ISO8601DateFormatter.cached.string(from: expectedConfirmTime))
+        #expect(confirmedEvent.payload["candidateTime"] == ISO8601DateFormatter.cached.string(from: expectedOnset))
+        #expect(confirmedEvent.payload["confirmationLatencyWindows"] == "4")
+    }
+
+    @Test("Route C micro disturbance holds candidate without penalty")
+    @MainActor
+    func routeCMicroDisturbanceHoldsCandidate() async throws {
+        let settings = routeCTestSettings()
+        let eventBus = EventBus()
+        let engine = RouteCEngine(settings: settings, eventBus: eventBus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        engine.start(session: routeCTestSession(start: start), priors: PriorSnapshot.empty.routePriors)
+
+        engine.onWindow(routeCTestWindow(index: 0, start: start, motion: routeCTestMovementMotion(rms: 0.06, peakCount: 2)))
+        engine.onWindow(routeCTestWindow(index: 1, start: start, motion: routeCTestMovementMotion(rms: 0.03, peakCount: 2)))
+        engine.onWindow(routeCTestWindow(index: 2, start: start, motion: routeCTestStillMotion(rms: 0.008)))
+        engine.onWindow(routeCTestWindow(index: 3, start: start, motion: routeCTestStillMotion(rms: 0.007)))
+        engine.onWindow(routeCTestWindow(index: 4, start: start, motion: routeCTestMicroDisturbanceMotion()))
+        engine.onWindow(routeCTestWindow(index: 5, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 6, start: start, motion: routeCTestStillMotion(rms: 0.006)))
 
         let prediction = try #require(engine.currentPrediction())
         #expect(prediction.confidence == .confirmed)
-        #expect(prediction.predictedSleepOnset != nil)
-        #expect(prediction.evidenceSummary.contains("Confirmed"))
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(60))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(210))
+        #expect(eventBus.recentEvents.first(where: { $0.eventType == "custom.candidatePenaltyApplied" }) == nil)
+        #expect(eventBus.recentEvents.first(where: { $0.eventType == "sleepRejected" }) == nil)
+    }
+
+    @Test("Route C minor disturbance adds penalty without reset")
+    @MainActor
+    func routeCMinorDisturbanceAddsPenalty() async throws {
+        let settings = routeCTestSettings()
+        let eventBus = EventBus()
+        let engine = RouteCEngine(settings: settings, eventBus: eventBus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        engine.start(session: routeCTestSession(start: start), priors: PriorSnapshot.empty.routePriors)
+
+        engine.onWindow(routeCTestWindow(index: 0, start: start, motion: routeCTestMovementMotion(rms: 0.06, peakCount: 2)))
+        engine.onWindow(routeCTestWindow(index: 1, start: start, motion: routeCTestMovementMotion(rms: 0.03, peakCount: 2)))
+        engine.onWindow(routeCTestWindow(index: 2, start: start, motion: routeCTestStillMotion(rms: 0.008)))
+        engine.onWindow(routeCTestWindow(index: 3, start: start, motion: routeCTestStillMotion(rms: 0.007)))
+        engine.onWindow(routeCTestWindow(index: 4, start: start, motion: routeCTestMinorDisturbanceMotion()))
+        engine.onWindow(routeCTestWindow(index: 5, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 6, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 7, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 8, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(60))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(270))
+        let penaltyEvent = try #require(eventBus.recentEvents.first(where: { $0.routeId == .C && $0.eventType == "custom.candidatePenaltyApplied" }))
+        #expect(penaltyEvent.payload["penaltyWindows"] == "2")
+        #expect(eventBus.recentEvents.first(where: { $0.routeId == .C && $0.eventType == "sleepRejected" }) == nil)
+    }
+
+    @Test("Route C major pickup resets candidate and requires a new candidate")
+    @MainActor
+    func routeCMajorPickupResetsAndRearms() async throws {
+        let settings = routeCTestSettings()
+        let eventBus = EventBus()
+        let engine = RouteCEngine(settings: settings, eventBus: eventBus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        engine.start(session: routeCTestSession(start: start), priors: PriorSnapshot.empty.routePriors)
+
+        engine.onWindow(routeCTestWindow(index: 0, start: start, motion: routeCTestMovementMotion(rms: 0.06, peakCount: 2)))
+        engine.onWindow(routeCTestWindow(index: 1, start: start, motion: routeCTestMovementMotion(rms: 0.03, peakCount: 2)))
+        engine.onWindow(routeCTestWindow(index: 2, start: start, motion: routeCTestStillMotion(rms: 0.008)))
+        engine.onWindow(routeCTestWindow(index: 3, start: start, motion: routeCTestStillMotion(rms: 0.007)))
+        engine.onWindow(
+            routeCTestWindow(
+                index: 4,
+                start: start,
+                motion: routeCTestStillMotion(rms: 0.006),
+                interaction: routeCTestInteraction(
+                    at: start.addingTimeInterval(150),
+                    isLocked: false,
+                    screenWakeCount: 1
+                )
+            )
+        )
+
+        let postPickupPrediction = try #require(engine.currentPrediction())
+        #expect(postPickupPrediction.confidence == .none)
+        #expect(postPickupPrediction.predictedSleepOnset == nil)
+        #expect(postPickupPrediction.evidenceSummary.contains("phone pickup"))
+
+        engine.onWindow(routeCTestWindow(index: 5, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 6, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 7, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+        engine.onWindow(routeCTestWindow(index: 8, start: start, motion: routeCTestStillMotion(rms: 0.006)))
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(150))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(270))
+
+        let rejectionEvent = try #require(eventBus.recentEvents.first(where: { $0.routeId == .C && $0.eventType == "sleepRejected" }))
+        #expect(rejectionEvent.payload["reason"] == "pickup_detected_major")
+        #expect(rejectionEvent.payload["signal"] == "interaction")
     }
 
     @Test("Route D stays unavailable when microphone is unavailable")
@@ -673,6 +761,52 @@ struct SleepDetectionPOCTests {
         #expect(decoded.breathingMinPeriodicityScore == RouteDParameters.default.breathingMinPeriodicityScore)
         #expect(decoded.playbackLeakageRejectThreshold == RouteDParameters.default.playbackLeakageRejectThreshold)
         #expect(decoded.snoreBoostWindowCount == RouteDParameters.default.snoreBoostWindowCount)
+    }
+
+    @Test("RouteCParameters decodes old settings JSON without disturbance fields")
+    func routeCParametersBackwardDecode() throws {
+        let data = Data(
+            """
+            {
+              "stillnessThreshold": 0.01,
+              "stillWindowThreshold": 6,
+              "confirmWindowCount": 10,
+              "significantMovementCooldownMinutes": 4,
+              "activeThreshold": 0.08,
+              "trendWindowSize": 10
+            }
+            """.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(RouteCParameters.self, from: data)
+        #expect(decoded.stillnessThreshold == 0.01)
+        #expect(decoded.minorDisturbancePenaltyWindows == RouteCParameters.default.minorDisturbancePenaltyWindows)
+        #expect(decoded.majorDisturbanceConsecutiveWindows == RouteCParameters.default.majorDisturbanceConsecutiveWindows)
+        #expect(decoded.recentInteractionWindowSeconds == RouteCParameters.default.recentInteractionWindowSeconds)
+    }
+
+    @Test("RoutePrediction decodes old persisted predictions without confirmedAt")
+    func routePredictionBackwardDecode() throws {
+        let onset = Date(timeIntervalSince1970: 1_744_668_800)
+        let updatedAt = Date(timeIntervalSince1970: 1_744_669_100)
+        let data = Data(
+            """
+            {
+              "routeId": "C",
+              "predictedSleepOnset": \(onset.timeIntervalSinceReferenceDate),
+              "confidence": "confirmed",
+              "evidenceSummary": "Legacy confirmed route",
+              "lastUpdated": \(updatedAt.timeIntervalSinceReferenceDate),
+              "isAvailable": true
+            }
+            """.utf8
+        )
+
+        let decoded = try JSONDecoder().decode(RoutePrediction.self, from: data)
+        #expect(decoded.routeId == .C)
+        #expect(decoded.predictedSleepOnset == onset)
+        #expect(decoded.confirmedAt == nil)
+        #expect(decoded.confidence == .confirmed)
     }
 
     @Test("Route E confirms from Watch wrist motion and heart rate windows")
@@ -1876,6 +2010,110 @@ private actor TestSettingsStore: SettingsStore {
     func saveWatchSetupCompleted(_ completed: Bool) async {
         watchSetupCompleted = completed
     }
+}
+
+private func routeCTestSettings() -> ExperimentSettings {
+    var settings = ExperimentSettings.default
+    settings.routeCParameters = RouteCParameters(
+        stillnessThreshold: 0.01,
+        stillWindowThreshold: 2,
+        confirmWindowCount: 4,
+        significantMovementCooldownMinutes: 0,
+        activeThreshold: 0.08,
+        trendWindowSize: 4,
+        minorDisturbancePenaltyWindows: 2,
+        majorDisturbanceConsecutiveWindows: 2,
+        recentInteractionWindowSeconds: 45
+    )
+    return settings
+}
+
+private func routeCTestSession(start: Date) -> Session {
+    var session = Session.make(
+        startTime: start,
+        deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: false, hasMotionAccess: true),
+        priorLevel: .P3,
+        enabledRoutes: RouteId.allCases
+    )
+    session.phonePlacement = PhonePlacement.bedSurface.rawValue
+    return session
+}
+
+private func routeCTestWindow(
+    index: Int,
+    start: Date,
+    motion: MotionFeatures,
+    interaction: InteractionFeatures? = nil
+) -> FeatureWindow {
+    FeatureWindow(
+        windowId: index,
+        startTime: start.addingTimeInterval(Double(index) * 30),
+        endTime: start.addingTimeInterval(Double(index + 1) * 30),
+        duration: 30,
+        source: .iphone,
+        motion: motion,
+        audio: nil,
+        interaction: interaction,
+        watch: nil
+    )
+}
+
+private func routeCTestStillMotion(rms: Double) -> MotionFeatures {
+    MotionFeatures(
+        accelRMS: rms,
+        peakCount: 0,
+        attitudeChangeRate: 1,
+        maxAccel: rms,
+        stillRatio: 0.95,
+        stillDuration: 28
+    )
+}
+
+private func routeCTestMovementMotion(rms: Double, peakCount: Int) -> MotionFeatures {
+    MotionFeatures(
+        accelRMS: rms,
+        peakCount: peakCount,
+        attitudeChangeRate: 4,
+        maxAccel: rms,
+        stillRatio: 0.5,
+        stillDuration: 10
+    )
+}
+
+private func routeCTestMicroDisturbanceMotion() -> MotionFeatures {
+    MotionFeatures(
+        accelRMS: 0.018,
+        peakCount: 0,
+        attitudeChangeRate: 2,
+        maxAccel: 0.02,
+        stillRatio: 0.82,
+        stillDuration: 14
+    )
+}
+
+private func routeCTestMinorDisturbanceMotion() -> MotionFeatures {
+    MotionFeatures(
+        accelRMS: 0.03,
+        peakCount: 2,
+        attitudeChangeRate: 5,
+        maxAccel: 0.04,
+        stillRatio: 0.6,
+        stillDuration: 8
+    )
+}
+
+private func routeCTestInteraction(
+    at time: Date,
+    isLocked: Bool,
+    screenWakeCount: Int,
+    timeSinceLastInteraction: TimeInterval = 5
+) -> InteractionFeatures {
+    InteractionFeatures(
+        isLocked: isLocked,
+        timeSinceLastInteraction: timeSinceLastInteraction,
+        screenWakeCount: screenWakeCount,
+        lastInteractionAt: time
+    )
 }
 
 private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {

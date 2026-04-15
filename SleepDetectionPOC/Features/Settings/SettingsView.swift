@@ -111,6 +111,28 @@ struct SettingsView: View {
                     in: 1...10,
                     step: 1
                 )
+
+                Stepper(
+                    "Minor penalty windows: \(model.settings.routeCParameters.minorDisturbancePenaltyWindows)",
+                    value: $model.settings.routeCParameters.minorDisturbancePenaltyWindows,
+                    in: 0...8
+                )
+
+                Stepper(
+                    "Major disturbance windows: \(model.settings.routeCParameters.majorDisturbanceConsecutiveWindows)",
+                    value: $model.settings.routeCParameters.majorDisturbanceConsecutiveWindows,
+                    in: 1...4
+                )
+
+                LabeledContent(
+                    "Recent interaction",
+                    value: "\(Int(model.settings.routeCParameters.recentInteractionWindowSeconds)) sec"
+                )
+                Slider(
+                    value: $model.settings.routeCParameters.recentInteractionWindowSeconds,
+                    in: 15...120,
+                    step: 5
+                )
             }
 
             Section("Route D Parameters") {
