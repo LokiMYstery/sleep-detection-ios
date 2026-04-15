@@ -1111,10 +1111,29 @@ struct RoutePrediction: Codable, Identifiable, Equatable, Sendable {
     var id: RouteId { routeId }
     var routeId: RouteId
     var predictedSleepOnset: Date?
+    var confirmedAt: Date?
     var confidence: SleepConfidence
     var evidenceSummary: String
     var lastUpdated: Date
     var isAvailable: Bool
+
+    init(
+        routeId: RouteId,
+        predictedSleepOnset: Date?,
+        confirmedAt: Date? = nil,
+        confidence: SleepConfidence,
+        evidenceSummary: String,
+        lastUpdated: Date,
+        isAvailable: Bool
+    ) {
+        self.routeId = routeId
+        self.predictedSleepOnset = predictedSleepOnset
+        self.confirmedAt = confirmedAt
+        self.confidence = confidence
+        self.evidenceSummary = evidenceSummary
+        self.lastUpdated = lastUpdated
+        self.isAvailable = isAvailable
+    }
 }
 
 struct RouteErrorRecord: Codable, Equatable, Sendable {
@@ -1364,6 +1383,7 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
         var confidence: SleepConfidence
         var isAvailable: Bool
         var predictedSleepOnset: Date?
+        var confirmedAt: Date?
         var lastUpdated: Date
         var evidenceSummary: String
     }
@@ -1424,6 +1444,7 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
                 confidence: prediction.confidence,
                 isAvailable: prediction.isAvailable,
                 predictedSleepOnset: prediction.predictedSleepOnset,
+                confirmedAt: prediction.confirmedAt,
                 lastUpdated: prediction.lastUpdated,
                 evidenceSummary: prediction.evidenceSummary
             )

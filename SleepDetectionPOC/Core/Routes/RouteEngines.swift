@@ -477,19 +477,19 @@ final class RouteCEngine: RouteEngine {
     private let settings: ExperimentSettings
     private let eventBus: EventBus
     private var prediction: RoutePrediction?
-    // Use CircularBuffer instead of Array for O(1) append/remove operations
-    // This eliminates O(n) removeFirst() operations
     private var motionHistory: CircularBuffer<MotionFeatures>
     private var state: RouteCState = .monitoring
     private var consecutiveStillWindows = 0
-    private var candidateDurationWindows = 0
+    private var qualifiedCandidateWindows = 0
+    private var accumulatedPenaltyWindows = 0
+    private var consecutiveDisturbanceWindows = 0
     private var candidateEnteredTime: Date?
     private var lastSignificantMovementAt: Date?
+    private var lastMajorInteractionAt: Date?
 
     init(settings: ExperimentSettings, eventBus: EventBus = .shared, maxHistorySize: Int = 100) {
         self.settings = settings
         self.eventBus = eventBus
-        // Pre-allocate circular buffer to avoid repeated allocations
         self.motionHistory = CircularBuffer(capacity: maxHistorySize)
     }
 
@@ -498,13 +498,15 @@ final class RouteCEngine: RouteEngine {
     }
 
     func start(session: Session, priors: RoutePriors) {
-        // Clear circular buffer instead of removeAll
         motionHistory.removeAll()
         state = .monitoring
         consecutiveStillWindows = 0
-        candidateDurationWindows = 0
+        qualifiedCandidateWindows = 0
+        accumulatedPenaltyWindows = 0
+        consecutiveDisturbanceWindows = 0
         candidateEnteredTime = nil
         lastSignificantMovementAt = nil
+        lastMajorInteractionAt = nil
         prediction = RoutePrediction(
             routeId: routeId,
             predictedSleepOnset: nil,
@@ -519,30 +521,108 @@ final class RouteCEngine: RouteEngine {
         guard let motion = window.motion else { return }
         let parameters = settings.routeCParameters
 
-        // Use CircularBuffer's appendOverwrite for O(1) operation
-        // This automatically overwrites oldest entries when full
         motionHistory.appendOverwrite(motion)
+        guard state != .confirmed else { return }
 
-        if motion.peakCount >= 2 {
+        if motion.peakCount >= 2 || motion.accelRMS > parameters.activeThreshold {
             lastSignificantMovementAt = window.endTime
         }
 
         let isStill = motion.stillRatio >= 0.9 && motion.accelRMS <= parameters.stillnessThreshold
+        let majorInteractionDetected = Self.isMajorInteraction(
+            interaction: window.interaction,
+            windowEndTime: window.endTime,
+            recentInteractionWindowSeconds: parameters.recentInteractionWindowSeconds
+        )
+        let strongMovementDetected = motion.peakCount >= 3 || motion.accelRMS > parameters.activeThreshold
+        let minorMovementDetected = Self.isMinorDisturbance(
+            motion: motion,
+            isStill: isStill,
+            parameters: parameters
+        )
+        let movementTrend = Self.slope(for: motionHistory.last(parameters.trendWindowSize).map(\.accelRMS))
+        let timeSinceSignificantMovement = window.endTime.timeIntervalSince(lastSignificantMovementAt ?? window.startTime.addingTimeInterval(-10_000))
 
-        if motion.peakCount >= 3 || motion.accelRMS > parameters.activeThreshold {
+        if majorInteractionDetected {
+            lastMajorInteractionAt = window.endTime
             if state == .candidate {
+                handleMajorDisturbance(
+                    window: window,
+                    reason: "pickup_detected_major",
+                    signal: "interaction"
+                )
+            } else {
+                resetToMonitoring(updatedAt: window.endTime, reason: "Monitoring restarted after phone interaction")
+            }
+            return
+        }
+
+        if state == .candidate {
+            if strongMovementDetected {
+                handleMajorDisturbance(
+                    window: window,
+                    reason: "significant_movement",
+                    signal: "motion"
+                )
+                return
+            }
+
+            if minorMovementDetected {
+                consecutiveStillWindows = 0
+                consecutiveDisturbanceWindows += 1
+                if consecutiveDisturbanceWindows >= parameters.majorDisturbanceConsecutiveWindows {
+                    handleMajorDisturbance(
+                        window: window,
+                        reason: "disturbance_escalated_major",
+                        signal: "motion_episode"
+                    )
+                } else if consecutiveDisturbanceWindows == 1 {
+                    applyMinorDisturbance(window: window)
+                } else {
+                    updateCandidatePrediction(
+                        confidence: .candidate,
+                        updatedAt: window.endTime,
+                        summary: candidateSummary(prefix: "Candidate disturbance continuing")
+                    )
+                }
+                return
+            }
+
+            consecutiveDisturbanceWindows = 0
+            if isStill {
+                consecutiveStillWindows += 1
+                qualifiedCandidateWindows += 1
+                updateCandidatePrediction(
+                    confidence: .suspected,
+                    updatedAt: window.endTime,
+                    summary: candidateSummary(prefix: "Candidate sustained")
+                )
                 eventBus.post(
                     RouteEvent(
                         routeId: routeId,
-                        eventType: "sleepRejected",
+                        eventType: "suspectedSleep",
                         payload: [
-                            "reason": "significant_movement",
-                            "accelRMS": String(format: "%.3f", motion.accelRMS),
-                            "peakCount": "\(motion.peakCount)"
+                            "candidateTime": ISO8601DateFormatter.cached.string(from: candidateEnteredTime ?? window.startTime),
+                            "elapsedWindows": "\(elapsedCandidateWindows(for: window))",
+                            "qualifiedWindows": "\(qualifiedCandidateWindows)",
+                            "requiredWindows": "\(requiredCandidateWindows())",
+                            "penaltyWindows": "\(accumulatedPenaltyWindows)"
                         ]
                     )
                 )
+                confirmCandidateIfReady(window: window)
+            } else {
+                consecutiveStillWindows = 0
+                updateCandidatePrediction(
+                    confidence: .candidate,
+                    updatedAt: window.endTime,
+                    summary: candidateSummary(prefix: "Candidate holding through micro disturbance")
+                )
             }
+            return
+        }
+
+        if strongMovementDetected {
             resetToMonitoring(updatedAt: window.endTime, reason: "Movement resumed")
             return
         }
@@ -550,19 +630,12 @@ final class RouteCEngine: RouteEngine {
         if isStill {
             consecutiveStillWindows += 1
         } else {
-            if state != .confirmed {
-                consecutiveStillWindows = 0
-                if state == .candidate {
-                    resetToMonitoring(updatedAt: window.endTime, reason: "Candidate interrupted by movement noise")
-                } else if state == .preSleep {
-                    updateState(.monitoring, updatedAt: window.endTime, summary: "Monitoring body movement")
-                }
+            consecutiveStillWindows = 0
+            if state == .preSleep {
+                updateState(.monitoring, updatedAt: window.endTime, summary: "Monitoring body movement")
             }
         }
 
-        // Use CircularBuffer's last() method for efficient O(k) access to last k elements
-        let movementTrend = Self.slope(for: motionHistory.last(parameters.trendWindowSize).map(\.accelRMS))
-        let timeSinceSignificantMovement = window.endTime.timeIntervalSince(lastSignificantMovementAt ?? window.startTime.addingTimeInterval(-10_000))
         let candidateReady =
             consecutiveStillWindows >= parameters.stillWindowThreshold &&
             movementTrend <= 0 &&
@@ -572,76 +645,8 @@ final class RouteCEngine: RouteEngine {
             updateState(.preSleep, updatedAt: window.endTime, summary: "Movement trend is decreasing")
         }
 
-        if state != .confirmed, candidateReady {
-            let runStartTime = window.startTime.addingTimeInterval(-window.duration * Double(max(consecutiveStillWindows - 1, 0)))
-            if state != .candidate {
-                state = .candidate
-                candidateEnteredTime = runStartTime
-                candidateDurationWindows = consecutiveStillWindows
-                prediction = RoutePrediction(
-                    routeId: routeId,
-                    predictedSleepOnset: runStartTime,
-                    confidence: .candidate,
-                    evidenceSummary: "Candidate detected after \(consecutiveStillWindows) still windows",
-                    lastUpdated: window.endTime,
-                    isAvailable: true
-                )
-                eventBus.post(
-                    RouteEvent(
-                        routeId: routeId,
-                        eventType: "candidateWindowEntered",
-                        payload: [
-                            "candidateTime": ISO8601DateFormatter.cached.string(from: runStartTime),
-                            "consecutiveStill": "\(consecutiveStillWindows)",
-                            "trend": String(format: "%.4f", movementTrend)
-                        ]
-                    )
-                )
-            } else {
-                candidateDurationWindows = consecutiveStillWindows
-                prediction = RoutePrediction(
-                    routeId: routeId,
-                    predictedSleepOnset: candidateEnteredTime,
-                    confidence: .suspected,
-                    evidenceSummary: "Candidate sustained for \(candidateDurationWindows) windows",
-                    lastUpdated: window.endTime,
-                    isAvailable: true
-                )
-                eventBus.post(
-                    RouteEvent(
-                        routeId: routeId,
-                        eventType: "suspectedSleep",
-                        payload: [
-                            "candidateTime": ISO8601DateFormatter.cached.string(from: candidateEnteredTime ?? window.startTime),
-                            "elapsedWindows": "\(candidateDurationWindows)"
-                        ]
-                    )
-                )
-            }
-        }
-
-        if state == .candidate, candidateDurationWindows >= parameters.confirmWindowCount {
-            state = .confirmed
-            let predictedTime = candidateEnteredTime ?? window.startTime
-            prediction = RoutePrediction(
-                routeId: routeId,
-                predictedSleepOnset: predictedTime,
-                confidence: .confirmed,
-                evidenceSummary: "Confirmed after sustained stillness from \(predictedTime.formattedTime)",
-                lastUpdated: window.endTime,
-                isAvailable: true
-            )
-            eventBus.post(
-                RouteEvent(
-                    routeId: routeId,
-                    eventType: "confirmedSleep",
-                    payload: [
-                        "predictedTime": ISO8601DateFormatter.cached.string(from: predictedTime),
-                        "method": "bodyMovement",
-                        "totalStillDuration": "\(consecutiveStillWindows)"
-                    ]
-                )
-            )
+        if candidateReady {
+            enterCandidate(window: window, movementTrend: movementTrend)
         }
     }
 
@@ -651,9 +656,114 @@ final class RouteCEngine: RouteEngine {
 
     func stop() {}
 
+    private func enterCandidate(window: FeatureWindow, movementTrend: Double) {
+        let runStartTime = window.startTime.addingTimeInterval(-window.duration * Double(max(consecutiveStillWindows - 1, 0)))
+        state = .candidate
+        candidateEnteredTime = runStartTime
+        qualifiedCandidateWindows = consecutiveStillWindows
+        accumulatedPenaltyWindows = 0
+        consecutiveDisturbanceWindows = 0
+        updateCandidatePrediction(
+            confidence: .candidate,
+            updatedAt: window.endTime,
+            summary: candidateSummary(prefix: "Candidate detected")
+        )
+        eventBus.post(
+            RouteEvent(
+                routeId: routeId,
+                eventType: "candidateWindowEntered",
+                payload: [
+                    "candidateTime": ISO8601DateFormatter.cached.string(from: runStartTime),
+                    "consecutiveStill": "\(consecutiveStillWindows)",
+                    "trend": String(format: "%.4f", movementTrend),
+                    "requiredWindows": "\(requiredCandidateWindows())"
+                ]
+            )
+        )
+        confirmCandidateIfReady(window: window)
+    }
+
+    private func applyMinorDisturbance(window: FeatureWindow) {
+        accumulatedPenaltyWindows += settings.routeCParameters.minorDisturbancePenaltyWindows
+        updateCandidatePrediction(
+            confidence: .candidate,
+            updatedAt: window.endTime,
+            summary: candidateSummary(prefix: "Candidate delayed by disturbance")
+        )
+        eventBus.post(
+            RouteEvent(
+                routeId: routeId,
+                eventType: "custom.candidatePenaltyApplied",
+                payload: [
+                    "candidateTime": ISO8601DateFormatter.cached.string(from: candidateEnteredTime ?? window.startTime),
+                    "penaltyWindows": "\(settings.routeCParameters.minorDisturbancePenaltyWindows)",
+                    "requiredWindows": "\(requiredCandidateWindows())",
+                    "qualifiedWindows": "\(qualifiedCandidateWindows)",
+                    "accelRMS": String(format: "%.3f", window.motion?.accelRMS ?? 0),
+                    "peakCount": "\(window.motion?.peakCount ?? 0)"
+                ]
+            )
+        )
+    }
+
+    private func handleMajorDisturbance(window: FeatureWindow, reason: String, signal: String) {
+        eventBus.post(
+            RouteEvent(
+                routeId: routeId,
+                eventType: "sleepRejected",
+                payload: [
+                    "reason": reason,
+                    "signal": signal,
+                    "candidateTime": candidateEnteredTime.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                    "qualifiedWindows": "\(qualifiedCandidateWindows)",
+                    "penaltyWindows": "\(accumulatedPenaltyWindows)",
+                    "accelRMS": String(format: "%.3f", window.motion?.accelRMS ?? 0),
+                    "peakCount": "\(window.motion?.peakCount ?? 0)"
+                ]
+            )
+        )
+        resetToMonitoring(
+            updatedAt: window.endTime,
+            reason: signal == "interaction" ? "Candidate reset by phone pickup" : "Candidate reset by major disturbance"
+        )
+    }
+
+    private func confirmCandidateIfReady(window: FeatureWindow) {
+        guard state == .candidate, qualifiedCandidateWindows >= requiredCandidateWindows() else { return }
+        state = .confirmed
+        let confirmedAt = window.endTime
+        let predictedTime = candidateEnteredTime ?? confirmedAt
+        prediction = RoutePrediction(
+            routeId: routeId,
+            predictedSleepOnset: predictedTime,
+            confirmedAt: confirmedAt,
+            confidence: .confirmed,
+            evidenceSummary: "Confirmed at \(confirmedAt.formattedTime) from candidate \(predictedTime.formattedTime)",
+            lastUpdated: window.endTime,
+            isAvailable: true
+        )
+        eventBus.post(
+            RouteEvent(
+                routeId: routeId,
+                eventType: "confirmedSleep",
+                payload: [
+                    "predictedTime": ISO8601DateFormatter.cached.string(from: predictedTime),
+                    "confirmedAt": ISO8601DateFormatter.cached.string(from: confirmedAt),
+                    "candidateTime": ISO8601DateFormatter.cached.string(from: predictedTime),
+                    "method": "bodyMovement",
+                    "totalStillDuration": "\(qualifiedCandidateWindows)",
+                    "confirmationLatencyWindows": "\(elapsedCandidateWindows(for: window))",
+                    "penaltyWindows": "\(accumulatedPenaltyWindows)"
+                ]
+            )
+        )
+    }
+
     private func resetToMonitoring(updatedAt: Date, reason: String) {
         consecutiveStillWindows = 0
-        candidateDurationWindows = 0
+        qualifiedCandidateWindows = 0
+        accumulatedPenaltyWindows = 0
+        consecutiveDisturbanceWindows = 0
         candidateEnteredTime = nil
         updateState(.monitoring, updatedAt: updatedAt, summary: reason)
     }
@@ -662,12 +772,71 @@ final class RouteCEngine: RouteEngine {
         state = newState
         prediction = RoutePrediction(
             routeId: routeId,
-            predictedSleepOnset: prediction?.predictedSleepOnset,
-            confidence: newState == .candidate ? .candidate : .none,
+            predictedSleepOnset: nil,
+            confidence: .none,
             evidenceSummary: summary,
             lastUpdated: updatedAt,
             isAvailable: true
         )
+    }
+
+    private func updateCandidatePrediction(
+        confidence: SleepConfidence,
+        updatedAt: Date,
+        summary: String
+    ) {
+        prediction = RoutePrediction(
+            routeId: routeId,
+            predictedSleepOnset: nil,
+            confidence: confidence,
+            evidenceSummary: summary,
+            lastUpdated: updatedAt,
+            isAvailable: true
+        )
+    }
+
+    private func candidateSummary(prefix: String) -> String {
+        let candidateLabel = candidateEnteredTime?.formattedTime ?? "unknown"
+        let penaltySummary = accumulatedPenaltyWindows > 0 ? " (+\(accumulatedPenaltyWindows) penalty)" : ""
+        return "\(prefix) from \(candidateLabel). Qualified \(qualifiedCandidateWindows)/\(requiredCandidateWindows())\(penaltySummary)"
+    }
+
+    private func requiredCandidateWindows() -> Int {
+        settings.routeCParameters.confirmWindowCount + accumulatedPenaltyWindows
+    }
+
+    private func elapsedCandidateWindows(for window: FeatureWindow) -> Int {
+        guard let candidateEnteredTime else { return 0 }
+        let elapsed = max(window.endTime.timeIntervalSince(candidateEnteredTime), 0)
+        let windowDuration = max(window.duration, 1)
+        return Int((elapsed / windowDuration).rounded())
+    }
+
+    private static func isMajorInteraction(
+        interaction: InteractionFeatures?,
+        windowEndTime: Date,
+        recentInteractionWindowSeconds: Double
+    ) -> Bool {
+        guard let interaction else { return false }
+        if interaction.screenWakeCount > 0 {
+            return true
+        }
+        guard let lastInteractionAt = interaction.lastInteractionAt else { return false }
+        let delta = windowEndTime.timeIntervalSince(lastInteractionAt)
+        return delta >= 0 && delta <= recentInteractionWindowSeconds
+    }
+
+    private static func isMinorDisturbance(
+        motion: MotionFeatures,
+        isStill: Bool,
+        parameters: RouteCParameters
+    ) -> Bool {
+        guard !isStill else { return false }
+        let accelThreshold = min(
+            parameters.activeThreshold * 0.75,
+            max(parameters.stillnessThreshold * 2.5, parameters.stillnessThreshold + 0.01)
+        )
+        return motion.peakCount >= 2 || motion.accelRMS >= accelThreshold || motion.stillRatio < 0.75
     }
 
     private static func slope(for values: [Double]) -> Double {

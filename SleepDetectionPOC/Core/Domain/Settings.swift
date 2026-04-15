@@ -103,6 +103,9 @@ struct RouteCParameters: Codable, Equatable, Sendable {
     var significantMovementCooldownMinutes: Double
     var activeThreshold: Double
     var trendWindowSize: Int
+    var minorDisturbancePenaltyWindows: Int
+    var majorDisturbanceConsecutiveWindows: Int
+    var recentInteractionWindowSeconds: Double
 
     static let `default` = RouteCParameters(
         stillnessThreshold: 0.01,
@@ -110,8 +113,60 @@ struct RouteCParameters: Codable, Equatable, Sendable {
         confirmWindowCount: 10,
         significantMovementCooldownMinutes: 4,
         activeThreshold: 0.08,
-        trendWindowSize: 10
+        trendWindowSize: 10,
+        minorDisturbancePenaltyWindows: 2,
+        majorDisturbanceConsecutiveWindows: 2,
+        recentInteractionWindowSeconds: 45
     )
+
+    private enum CodingKeys: String, CodingKey {
+        case stillnessThreshold
+        case stillWindowThreshold
+        case confirmWindowCount
+        case significantMovementCooldownMinutes
+        case activeThreshold
+        case trendWindowSize
+        case minorDisturbancePenaltyWindows
+        case majorDisturbanceConsecutiveWindows
+        case recentInteractionWindowSeconds
+    }
+
+    init(
+        stillnessThreshold: Double,
+        stillWindowThreshold: Int,
+        confirmWindowCount: Int,
+        significantMovementCooldownMinutes: Double,
+        activeThreshold: Double,
+        trendWindowSize: Int,
+        minorDisturbancePenaltyWindows: Int,
+        majorDisturbanceConsecutiveWindows: Int,
+        recentInteractionWindowSeconds: Double
+    ) {
+        self.stillnessThreshold = stillnessThreshold
+        self.stillWindowThreshold = stillWindowThreshold
+        self.confirmWindowCount = confirmWindowCount
+        self.significantMovementCooldownMinutes = significantMovementCooldownMinutes
+        self.activeThreshold = activeThreshold
+        self.trendWindowSize = trendWindowSize
+        self.minorDisturbancePenaltyWindows = minorDisturbancePenaltyWindows
+        self.majorDisturbanceConsecutiveWindows = majorDisturbanceConsecutiveWindows
+        self.recentInteractionWindowSeconds = recentInteractionWindowSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            stillnessThreshold: try container.decodeIfPresent(Double.self, forKey: .stillnessThreshold) ?? Self.default.stillnessThreshold,
+            stillWindowThreshold: try container.decodeIfPresent(Int.self, forKey: .stillWindowThreshold) ?? Self.default.stillWindowThreshold,
+            confirmWindowCount: try container.decodeIfPresent(Int.self, forKey: .confirmWindowCount) ?? Self.default.confirmWindowCount,
+            significantMovementCooldownMinutes: try container.decodeIfPresent(Double.self, forKey: .significantMovementCooldownMinutes) ?? Self.default.significantMovementCooldownMinutes,
+            activeThreshold: try container.decodeIfPresent(Double.self, forKey: .activeThreshold) ?? Self.default.activeThreshold,
+            trendWindowSize: try container.decodeIfPresent(Int.self, forKey: .trendWindowSize) ?? Self.default.trendWindowSize,
+            minorDisturbancePenaltyWindows: try container.decodeIfPresent(Int.self, forKey: .minorDisturbancePenaltyWindows) ?? Self.default.minorDisturbancePenaltyWindows,
+            majorDisturbanceConsecutiveWindows: try container.decodeIfPresent(Int.self, forKey: .majorDisturbanceConsecutiveWindows) ?? Self.default.majorDisturbanceConsecutiveWindows,
+            recentInteractionWindowSeconds: try container.decodeIfPresent(Double.self, forKey: .recentInteractionWindowSeconds) ?? Self.default.recentInteractionWindowSeconds
+        )
+    }
 }
 
 struct RouteDParameters: Codable, Equatable, Sendable {
