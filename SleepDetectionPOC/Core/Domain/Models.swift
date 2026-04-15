@@ -1356,24 +1356,16 @@ struct SleepTimelineTracker: Sendable {
     private static func routeEvidence(from prediction: RoutePrediction) -> RouteEpisodeEvidence? {
         guard prediction.isAvailable else { return nil }
 
-        let candidateAt = prediction.candidateAt ?? prediction.actionReadyAt ?? prediction.confirmedAt
-        let actionReadyAt = prediction.actionReadyAt ?? prediction.confirmedAt
+        let candidateAt = prediction.candidateAt ?? prediction.confirmedAt ?? prediction.actionReadyAt
+        let actionReadyAt = prediction.actionReadyAt
         guard candidateAt != nil || actionReadyAt != nil else { return nil }
 
-        let supportsImmediateAction: Bool
-        switch prediction.routeId {
-        case .D:
-            supportsImmediateAction = prediction.supportsImmediateAction
-        case .E:
-            supportsImmediateAction = true
-        default:
-            supportsImmediateAction = false
-        }
+        let supportsImmediateAction = prediction.supportsImmediateAction
 
         let onsetEstimate = prediction.predictedSleepOnset
         let isBackfilled: Bool
-        if let onsetEstimate, let actionReadyAt {
-            isBackfilled = onsetEstimate < actionReadyAt
+        if let onsetEstimate, let referenceAnchor = prediction.actionReadyAt ?? prediction.confirmedAt ?? prediction.candidateAt {
+            isBackfilled = onsetEstimate < referenceAnchor
         } else {
             isBackfilled = false
         }
@@ -1388,7 +1380,7 @@ struct SleepTimelineTracker: Sendable {
             evidenceSummary: prediction.evidenceSummary,
             isBackfilled: isBackfilled,
             supportsImmediateAction: supportsImmediateAction,
-            isLatched: prediction.isLatched || actionReadyAt != nil
+            isLatched: prediction.isLatched || prediction.actionReadyAt != nil
         )
     }
 
@@ -1462,7 +1454,8 @@ struct SleepTimelineTracker: Sendable {
     private static func closeEpisode(at episodeIndex: Int, updatedAt: Date, timeline: inout SleepTimeline) {
         guard timeline.episodes.indices.contains(episodeIndex) else { return }
         var episode = timeline.episodes[episodeIndex]
-        if episode.actionReadyAt != nil {
+        let hasConfirmedDiagnosticEvidence = episode.routeEvidence.contains { $0.confidence == .confirmed || $0.isLatched }
+        if episode.actionReadyAt != nil || hasConfirmedDiagnosticEvidence {
             episode.wakeDetectedAt = episode.wakeDetectedAt ?? updatedAt
             episode.endedAt = updatedAt
             episode.state = .ended

@@ -204,6 +204,7 @@ final class RouteAEngine: RouteEngine {
             self.prediction = RoutePrediction(
                 routeId: routeId,
                 predictedSleepOnset: predicted,
+                confirmedAt: window.endTime,
                 confidence: .confirmed,
                 evidenceSummary: "Timer-based prediction reached at \(predicted.formattedTime)",
                 lastUpdated: window.endTime,
@@ -279,6 +280,7 @@ final class RouteBEngine: RouteEngine {
     private var priors: RoutePriors?
     private var prediction: RoutePrediction?
     private var anchor: Date?
+    private var candidateAt: Date?
     private var consecutiveStillWindows = 0
     private var confirmed = false
 
@@ -296,6 +298,7 @@ final class RouteBEngine: RouteEngine {
         self.priors = priors
         self.prediction = fallbackPrediction(updatedAt: session.startTime)
         self.anchor = nil
+        self.candidateAt = nil
         self.consecutiveStillWindows = 0
         self.confirmed = false
         emitPredictionUpdated(reason: "fallbackToRouteA")
@@ -315,6 +318,7 @@ final class RouteBEngine: RouteEngine {
             if anchor != nil || confirmed {
                 let previousAnchor = anchor
                 anchor = nil
+                candidateAt = nil
                 confirmed = false
                 prediction = fallbackPrediction(updatedAt: window.endTime)
                 eventBus.post(
@@ -353,6 +357,7 @@ final class RouteBEngine: RouteEngine {
         if anchor == nil, quiet && still, consecutiveStillWindows >= parameters.confirmWindowCount {
             let putDownAnchor = interaction.lastInteractionAt ?? window.endTime
             anchor = putDownAnchor
+            candidateAt = window.endTime
             let latency = PredictionMath.resolvedLatencyMinutes(priors: priors ?? .init(
                 priorLevel: .P3,
                 typicalSleepOnset: nil,
@@ -371,6 +376,7 @@ final class RouteBEngine: RouteEngine {
             prediction = RoutePrediction(
                 routeId: routeId,
                 predictedSleepOnset: predicted,
+                candidateAt: candidateAt,
                 confidence: .candidate,
                 evidenceSummary: "Put-down anchor at \(putDownAnchor.formattedTime), latency: \(Int(latency)) min",
                 lastUpdated: window.endTime,
@@ -382,6 +388,7 @@ final class RouteBEngine: RouteEngine {
                     eventType: "candidateWindowEntered",
                     payload: [
                         "putDownTime": ISO8601DateFormatter.cached.string(from: putDownAnchor),
+                        "candidateAt": candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "stillWindowCount": "\(consecutiveStillWindows)"
                     ]
                 )
@@ -395,6 +402,8 @@ final class RouteBEngine: RouteEngine {
             self.prediction = RoutePrediction(
                 routeId: routeId,
                 predictedSleepOnset: predicted,
+                candidateAt: candidateAt,
+                confirmedAt: window.endTime,
                 confidence: .confirmed,
                 evidenceSummary: "Confirmed using put-down anchor at \(predicted.formattedTime)",
                 lastUpdated: window.endTime,
@@ -485,6 +494,7 @@ final class RouteCEngine: RouteEngine {
     private var accumulatedPenaltyWindows = 0
     private var consecutiveDisturbanceWindows = 0
     private var candidateEnteredTime: Date?
+    private var candidateAt: Date?
     private var lastSignificantMovementAt: Date?
     private var lastMajorInteractionAt: Date?
 
@@ -506,6 +516,7 @@ final class RouteCEngine: RouteEngine {
         accumulatedPenaltyWindows = 0
         consecutiveDisturbanceWindows = 0
         candidateEnteredTime = nil
+        candidateAt = nil
         lastSignificantMovementAt = nil
         lastMajorInteractionAt = nil
         prediction = RoutePrediction(
@@ -661,6 +672,7 @@ final class RouteCEngine: RouteEngine {
         let runStartTime = window.startTime.addingTimeInterval(-window.duration * Double(max(consecutiveStillWindows - 1, 0)))
         state = .candidate
         candidateEnteredTime = runStartTime
+        candidateAt = window.endTime
         qualifiedCandidateWindows = consecutiveStillWindows
         accumulatedPenaltyWindows = 0
         consecutiveDisturbanceWindows = 0
@@ -675,6 +687,7 @@ final class RouteCEngine: RouteEngine {
                 eventType: "candidateWindowEntered",
                 payload: [
                     "candidateTime": ISO8601DateFormatter.cached.string(from: runStartTime),
+                    "candidateAt": candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                     "consecutiveStill": "\(consecutiveStillWindows)",
                     "trend": String(format: "%.4f", movementTrend),
                     "requiredWindows": "\(requiredCandidateWindows())"
@@ -737,11 +750,13 @@ final class RouteCEngine: RouteEngine {
         prediction = RoutePrediction(
             routeId: routeId,
             predictedSleepOnset: predictedTime,
+            candidateAt: candidateAt,
             confirmedAt: confirmedAt,
             confidence: .confirmed,
             evidenceSummary: "Confirmed at \(confirmedAt.formattedTime) from candidate \(predictedTime.formattedTime)",
             lastUpdated: window.endTime,
-            isAvailable: true
+            isAvailable: true,
+            isLatched: true
         )
         eventBus.post(
             RouteEvent(
@@ -751,6 +766,7 @@ final class RouteCEngine: RouteEngine {
                     "predictedTime": ISO8601DateFormatter.cached.string(from: predictedTime),
                     "confirmedAt": ISO8601DateFormatter.cached.string(from: confirmedAt),
                     "candidateTime": ISO8601DateFormatter.cached.string(from: predictedTime),
+                    "candidateAt": candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                     "method": "bodyMovement",
                     "totalStillDuration": "\(qualifiedCandidateWindows)",
                     "confirmationLatencyWindows": "\(elapsedCandidateWindows(for: window))",
@@ -766,6 +782,7 @@ final class RouteCEngine: RouteEngine {
         accumulatedPenaltyWindows = 0
         consecutiveDisturbanceWindows = 0
         candidateEnteredTime = nil
+        candidateAt = nil
         updateState(.monitoring, updatedAt: updatedAt, summary: reason)
     }
 
@@ -788,7 +805,8 @@ final class RouteCEngine: RouteEngine {
     ) {
         prediction = RoutePrediction(
             routeId: routeId,
-            predictedSleepOnset: nil,
+            predictedSleepOnset: candidateEnteredTime,
+            candidateAt: candidateAt,
             confidence: confidence,
             evidenceSummary: summary,
             lastUpdated: updatedAt,
@@ -1031,7 +1049,7 @@ final class RouteDEngine: RouteEngine {
                 evidenceSummary: "Confirmed using motion + audio + interaction from \(onsetEstimate.formattedTime) · \(audioEvidenceSummary(audio: audio, quietAudio: quietAudio, breathingSupport: breathingSupport, snoreSupport: snoreSupport))",
                 lastUpdated: window.endTime,
                 isAvailable: true,
-                supportsImmediateAction: true,
+                supportsImmediateAction: false,
                 isLatched: true
             )
             eventBus.post(
@@ -1297,7 +1315,7 @@ final class RouteDEngine: RouteEngine {
             evidenceSummary: summary,
             lastUpdated: updatedAt,
             isAvailable: true,
-            supportsImmediateAction: true,
+            supportsImmediateAction: false,
             isLatched: actionReadyAt != nil
         )
     }

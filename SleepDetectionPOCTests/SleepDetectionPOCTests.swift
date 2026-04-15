@@ -35,6 +35,55 @@ struct SleepDetectionPOCTests {
         #expect(prediction.predictedSleepOnset?.formattedTime == "10:57 PM" || prediction.predictedSleepOnset != nil)
     }
 
+    @Test("Route A records confirmedAt separately from its predicted onset")
+    @MainActor
+    func routeAConfirmedAtSemantics() async throws {
+        var settings = ExperimentSettings.default
+        settings.targetBedtime = ClockTime(hour: 22, minute: 30)
+        let engine = RouteAEngine(settings: settings)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P3,
+                typicalSleepOnset: ClockTime.from(date: start),
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: 0,
+                preSleepHRBaseline: nil,
+                sleepHRTarget: nil,
+                hrDropThreshold: nil
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: nil
+            )
+        )
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.predictedSleepOnset == start)
+        #expect(prediction.confirmedAt == start.addingTimeInterval(30))
+        #expect(prediction.actionReadyAt == nil)
+        #expect(prediction.supportsImmediateAction == false)
+    }
+
     @Test("Route B detects put-down anchor and invalidates on pickup")
     @MainActor
     func routeBAnchorLifecycle() async throws {
@@ -67,6 +116,7 @@ struct SleepDetectionPOCTests {
 
         let anchoredPrediction = try #require(engine.currentPrediction())
         #expect(anchoredPrediction.confidence == .candidate)
+        #expect(anchoredPrediction.candidateAt == start.addingTimeInterval(90))
         #expect(anchoredPrediction.evidenceSummary.contains("Put-down anchor"))
 
         engine.onWindow(
@@ -86,6 +136,86 @@ struct SleepDetectionPOCTests {
         let fallbackPrediction = try #require(engine.currentPrediction())
         #expect(fallbackPrediction.evidenceSummary.contains("Fallback"))
         #expect(fallbackPrediction.confidence == .none)
+    }
+
+    @Test("Route B keeps candidateAt at anchor-detection time and confirmedAt at prediction crossing")
+    @MainActor
+    func routeBConfirmedAtSemantics() async throws {
+        let settings = ExperimentSettings.default
+        let engine = RouteBEngine(settings: settings)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P3,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: 1,
+                preSleepHRBaseline: nil,
+                sleepHRTarget: nil,
+                hrDropThreshold: nil
+            )
+        )
+
+        for index in 0..<3 {
+            engine.onWindow(
+                FeatureWindow(
+                    windowId: index,
+                    startTime: start.addingTimeInterval(Double(index) * 30),
+                    endTime: start.addingTimeInterval(Double(index + 1) * 30),
+                    duration: 30,
+                    source: .iphone,
+                    motion: MotionFeatures(accelRMS: 0.01, peakCount: 0, attitudeChangeRate: 1, maxAccel: 0.02, stillRatio: 0.95, stillDuration: 28),
+                    audio: nil,
+                    interaction: InteractionFeatures(
+                        isLocked: true,
+                        timeSinceLastInteraction: 180,
+                        screenWakeCount: 0,
+                        lastInteractionAt: start.addingTimeInterval(60)
+                    ),
+                    watch: nil
+                )
+            )
+        }
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate)
+        #expect(prediction.predictedSleepOnset == start.addingTimeInterval(120))
+        #expect(prediction.candidateAt == start.addingTimeInterval(90))
+        #expect(prediction.confirmedAt == nil)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 3,
+                startTime: start.addingTimeInterval(90),
+                endTime: start.addingTimeInterval(120),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(accelRMS: 0.01, peakCount: 0, attitudeChangeRate: 1, maxAccel: 0.02, stillRatio: 0.95, stillDuration: 28),
+                audio: nil,
+                interaction: InteractionFeatures(
+                    isLocked: true,
+                    timeSinceLastInteraction: 210,
+                    screenWakeCount: 0,
+                    lastInteractionAt: start.addingTimeInterval(60)
+                ),
+                watch: nil
+            )
+        )
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.candidateAt == start.addingTimeInterval(90))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(120))
+        #expect(prediction.actionReadyAt == nil)
+        #expect(prediction.supportsImmediateAction == false)
     }
 
     @Test("Prior computer yields P1 with enough sleep samples")
@@ -295,7 +425,8 @@ struct SleepDetectionPOCTests {
 
         let candidatePrediction = try #require(engine.currentPrediction())
         #expect(candidatePrediction.confidence == .candidate)
-        #expect(candidatePrediction.predictedSleepOnset == nil)
+        #expect(candidatePrediction.predictedSleepOnset == start.addingTimeInterval(60))
+        #expect(candidatePrediction.candidateAt == start.addingTimeInterval(120))
         #expect(candidatePrediction.confirmedAt == nil)
 
         engine.onWindow(routeCTestWindow(index: 4, start: start, motion: routeCTestStillMotion(rms: 0.006), interaction: steadyUnlockedInteraction))
@@ -306,13 +437,16 @@ struct SleepDetectionPOCTests {
         let expectedConfirmTime = start.addingTimeInterval(180)
         #expect(prediction.confidence == .confirmed)
         #expect(prediction.predictedSleepOnset == expectedOnset)
+        #expect(prediction.candidateAt == start.addingTimeInterval(120))
         #expect(prediction.confirmedAt == expectedConfirmTime)
+        #expect(prediction.isLatched)
         #expect(prediction.evidenceSummary.contains("Confirmed"))
 
         let confirmedEvent = try #require(eventBus.recentEvents.first(where: { $0.routeId == .C && $0.eventType == "confirmedSleep" }))
         #expect(confirmedEvent.payload["predictedTime"] == ISO8601DateFormatter.cached.string(from: expectedOnset))
         #expect(confirmedEvent.payload["confirmedAt"] == ISO8601DateFormatter.cached.string(from: expectedConfirmTime))
         #expect(confirmedEvent.payload["candidateTime"] == ISO8601DateFormatter.cached.string(from: expectedOnset))
+        #expect(confirmedEvent.payload["candidateAt"] == ISO8601DateFormatter.cached.string(from: start.addingTimeInterval(120)))
         #expect(confirmedEvent.payload["confirmationLatencyWindows"] == "4")
     }
 
@@ -610,8 +744,9 @@ struct SleepDetectionPOCTests {
         #expect(prediction.confidence == .confirmed)
         #expect(prediction.predictedSleepOnset == start)
         #expect(prediction.candidateAt == start.addingTimeInterval(30))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(60))
         #expect(prediction.actionReadyAt == start.addingTimeInterval(60))
-        #expect(prediction.supportsImmediateAction)
+        #expect(prediction.supportsImmediateAction == false)
         #expect(prediction.isLatched)
         #expect(bus.recentEvents.filter { $0.routeId == .D && $0.eventType == "confirmedSleep" }.count == 1)
 
@@ -968,8 +1103,8 @@ struct SleepDetectionPOCTests {
         #expect(decoded.isLatched == false)
     }
 
-    @Test("SleepTimelineTracker records primary and re-onset episodes")
-    func sleepTimelineTrackerLifecycle() throws {
+    @Test("SleepTimelineTracker keeps diagnostic routes in the timeline without action readiness")
+    func sleepTimelineTrackerDiagnosticRoutes() throws {
         var tracker = SleepTimelineTracker()
         let start = Date(timeIntervalSince1970: 1_712_665_200)
         tracker.startSession(at: start)
@@ -977,26 +1112,34 @@ struct SleepDetectionPOCTests {
         tracker.sync(
             predictions: [
                 RoutePrediction(
-                    routeId: .D,
+                    routeId: .A,
                     predictedSleepOnset: start,
+                    confirmedAt: start.addingTimeInterval(60),
+                    confidence: .confirmed,
+                    evidenceSummary: "Route A confirmed",
+                    lastUpdated: start.addingTimeInterval(60),
+                    isAvailable: true
+                ),
+                RoutePrediction(
+                    routeId: .B,
+                    predictedSleepOnset: start.addingTimeInterval(90),
                     candidateAt: start.addingTimeInterval(30),
                     confidence: .candidate,
-                    evidenceSummary: "Route D candidate",
+                    evidenceSummary: "Route B candidate",
                     lastUpdated: start.addingTimeInterval(30),
+                    isAvailable: true
+                ),
+                RoutePrediction(
+                    routeId: .C,
+                    predictedSleepOnset: start,
+                    candidateAt: start.addingTimeInterval(45),
+                    confirmedAt: start.addingTimeInterval(90),
+                    confidence: .confirmed,
+                    evidenceSummary: "Route C confirmed",
+                    lastUpdated: start.addingTimeInterval(90),
                     isAvailable: true,
-                    supportsImmediateAction: true
-                )
-            ],
-            updatedAt: start.addingTimeInterval(30)
-        )
-
-        var timeline = try #require(tracker.timeline)
-        #expect(timeline.episodes.count == 1)
-        #expect(timeline.episodes[0].kind == .primary)
-        #expect(timeline.latestNightState == .candidate)
-
-        tracker.sync(
-            predictions: [
+                    isLatched: true
+                ),
                 RoutePrediction(
                     routeId: .D,
                     predictedSleepOnset: start,
@@ -1007,43 +1150,40 @@ struct SleepDetectionPOCTests {
                     evidenceSummary: "Route D confirmed",
                     lastUpdated: start.addingTimeInterval(60),
                     isAvailable: true,
-                    supportsImmediateAction: true,
+                    supportsImmediateAction: false,
+                    isLatched: true
+                ),
+                RoutePrediction(
+                    routeId: .E,
+                    predictedSleepOnset: start.addingTimeInterval(15),
+                    candidateAt: start.addingTimeInterval(40),
+                    confirmedAt: start.addingTimeInterval(70),
+                    actionReadyAt: start.addingTimeInterval(70),
+                    confidence: .confirmed,
+                    evidenceSummary: "Route E confirmed",
+                    lastUpdated: start.addingTimeInterval(70),
+                    isAvailable: true,
+                    supportsImmediateAction: false,
                     isLatched: true
                 )
             ],
-            updatedAt: start.addingTimeInterval(60)
+            updatedAt: start.addingTimeInterval(90)
         )
 
-        timeline = try #require(tracker.timeline)
-        #expect(timeline.primaryEpisodeIndex == 0)
-        #expect(timeline.primaryActionReadyAt == start.addingTimeInterval(60))
-        #expect(timeline.episodes[0].state == .actionReady)
+        var timeline = try #require(tracker.timeline)
+        #expect(timeline.episodes.count == 1)
+        #expect(timeline.episodes[0].kind == .primary)
+        #expect(timeline.episodes[0].routeEvidence.map(\.routeId) == [.A, .B, .C, .D, .E])
+        #expect(timeline.episodes[0].actionEligibility == .ineligible)
+        #expect(timeline.episodes[0].state == .candidate)
+        #expect(timeline.latestNightState == .candidate)
+        #expect(timeline.primaryEpisodeIndex == nil)
+        #expect(timeline.primaryActionReadyAt == nil)
 
         tracker.sync(predictions: [], updatedAt: start.addingTimeInterval(90))
         timeline = try #require(tracker.timeline)
         #expect(timeline.episodes[0].state == .ended)
         #expect(timeline.episodes[0].wakeDetectedAt == start.addingTimeInterval(90))
-
-        tracker.sync(
-            predictions: [
-                RoutePrediction(
-                    routeId: .D,
-                    predictedSleepOnset: start.addingTimeInterval(120),
-                    candidateAt: start.addingTimeInterval(150),
-                    confidence: .candidate,
-                    evidenceSummary: "Route D re-onset candidate",
-                    lastUpdated: start.addingTimeInterval(150),
-                    isAvailable: true,
-                    supportsImmediateAction: true
-                )
-            ],
-            updatedAt: start.addingTimeInterval(150)
-        )
-
-        timeline = try #require(tracker.timeline)
-        #expect(timeline.episodes.count == 2)
-        #expect(timeline.episodes[1].kind == .reOnset)
-        #expect(timeline.episodes[1].state == .candidate)
     }
 
     @Test("Route E confirms from Watch wrist motion and heart rate windows")
