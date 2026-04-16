@@ -1550,6 +1550,8 @@ final class RouteEEngine: RouteEngine {
         var candidateStreak = 0
         var fullConfirmStreak = 0
         var watchDoubleStreak = 0
+        var behavioralConfirmStreak = 0
+        var candidateFailureStreak = 0
         var candidateTime: Date?
         var candidateAt: Date?
         var confirmedAt: Date?
@@ -1573,6 +1575,7 @@ final class RouteEEngine: RouteEngine {
         var candidateCountedWatchWindowIds: Set<Int> = []
         var fullConfirmCountedWatchWindowIds: Set<Int> = []
         var watchDoubleCountedWatchWindowIds: Set<Int> = []
+        var behavioralConfirmCountedWatchWindowIds: Set<Int> = []
         let sleepTarget = resolvedSleepTarget(from: priors)
         let hrDropThreshold = resolvedHRDropThreshold(from: priors)
 
@@ -1664,6 +1667,8 @@ final class RouteEEngine: RouteEngine {
                 candidateStreak = 0
                 fullConfirmStreak = 0
                 watchDoubleStreak = 0
+                behavioralConfirmStreak = 0
+                candidateFailureStreak = 0
                 candidateTime = nil
                 candidateAt = nil
                 if state != .confirmed {
@@ -1750,6 +1755,12 @@ final class RouteEEngine: RouteEngine {
             let heartRateMet =
                 hrTargetStreak >= parameters.hrConfirmSampleCount ||
                 (heartRateTrendMet && hrTrendStreak >= parameters.hrTrendWindowCount)
+            let softHeartRateMet = isSoftHeartRateQualified(
+                trend: heartRateTrend,
+                heartRate: watch.heartRate,
+                sleepTarget: sleepTarget,
+                hasPhysiologyPriors: priors.preSleepHRBaseline != nil || priors.sleepHRTarget != nil
+            )
             let interactionMet = interactionSatisfied(
                 at: window.endTime,
                 interaction: latestInteraction,
@@ -1780,6 +1791,8 @@ final class RouteEEngine: RouteEngine {
                     candidateStreak = 0
                     fullConfirmStreak = 0
                     watchDoubleStreak = 0
+                    behavioralConfirmStreak = 0
+                    candidateFailureStreak = 0
                     candidateTime = nil
                     candidateAt = nil
                     if state != .confirmed {
@@ -1813,6 +1826,8 @@ final class RouteEEngine: RouteEngine {
                 candidateStreak = 0
                 fullConfirmStreak = 0
                 watchDoubleStreak = 0
+                behavioralConfirmStreak = 0
+                candidateFailureStreak = 0
                 candidateTime = nil
                 candidateAt = nil
                 if state != .confirmed {
@@ -1827,8 +1842,10 @@ final class RouteEEngine: RouteEngine {
                 ((watchMotionMet || heartRateMet) && interactionMet)
             let fullyConfirmed = watchMotionMet && heartRateMet && interactionMet
             let watchDoubleConfirmed = watchMotionMet && heartRateMet
+            let behavioralConfirmed = watchMotionMet && interactionMet && softHeartRateMet
 
             if candidateMet {
+                candidateFailureStreak = 0
                 let contributesNewCandidate = candidateCountedWatchWindowIds.insert(matchedWatch.windowId).inserted
                 if contributesNewCandidate {
                     if candidateStreak == 0 {
@@ -1849,6 +1866,13 @@ final class RouteEEngine: RouteEngine {
                 }
                 if watchDoubleConfirmed, watchDoubleCountedWatchWindowIds.insert(matchedWatch.windowId).inserted {
                     watchDoubleStreak += 1
+                }
+
+                if contributesNewCandidate && !behavioralConfirmed {
+                    behavioralConfirmStreak = 0
+                }
+                if behavioralConfirmed, behavioralConfirmCountedWatchWindowIds.insert(matchedWatch.windowId).inserted {
+                    behavioralConfirmStreak += 1
                 }
 
                 if candidateAt == nil, candidateStreak >= parameters.candidateWindowCount {
@@ -1874,6 +1898,14 @@ final class RouteEEngine: RouteEngine {
                     confirmType = "watchDoubleChannel"
                     break
                 }
+
+                if behavioralConfirmStreak >= parameters.extendedConfirmWindowCount {
+                    state = .confirmed
+                    predictedTime = candidateTime
+                    confirmedAt = window.endTime
+                    confirmType = heartRateMet ? "watchBehavioralChannel" : "behavioralFallback"
+                    break
+                }
             } else {
                 if state == .candidate {
                     breakingContext = makeBreakingContext(
@@ -1893,10 +1925,19 @@ final class RouteEEngine: RouteEngine {
                         motion: latestMotion,
                         evaluationTime: window.endTime
                     )
+                    candidateFailureStreak += 1
+                    if candidateFailureStreak < 2 {
+                        fullConfirmStreak = 0
+                        watchDoubleStreak = 0
+                        predictedTime = candidateTime
+                        continue
+                    }
                 }
                 candidateStreak = 0
                 fullConfirmStreak = 0
                 watchDoubleStreak = 0
+                behavioralConfirmStreak = 0
+                candidateFailureStreak = 0
                 candidateTime = nil
                 candidateAt = nil
                 if state != .confirmed {
@@ -2238,6 +2279,16 @@ final class RouteEEngine: RouteEngine {
             return false
         }
         return baseline - heartRate >= hrDropThreshold * 0.6
+    }
+
+    private func isSoftHeartRateQualified(
+        trend: WatchFeatures.HRTrend,
+        heartRate: Double?,
+        sleepTarget: Double?,
+        hasPhysiologyPriors: Bool
+    ) -> Bool {
+        guard hasPhysiologyPriors, let heartRate, let sleepTarget, trend != .rising else { return false }
+        return heartRate <= sleepTarget + 1.0
     }
 
     private func rejectionChannel(
