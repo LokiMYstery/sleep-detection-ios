@@ -873,6 +873,81 @@ struct SleepDetectionPOCTests {
         #expect(prediction.evidenceSummary.contains("breathing"))
     }
 
+    @Test("Route D confirmed event omits raw breathing rate when support is absent")
+    @MainActor
+    func routeDConfirmedEventUsesAcceptedBreathingOnly() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeDParameters = RouteDParameters(
+            motionStillnessThreshold: 0.015,
+            audioQuietThreshold: 0.02,
+            audioVarianceThreshold: 0.0003,
+            frictionEventThreshold: 1,
+            breathingMinPeriodicityScore: 0.43,
+            breathingMaxIntervalCV: 0.4,
+            playbackLeakageRejectThreshold: 0.68,
+            disturbanceRejectThreshold: 0.62,
+            snoreCandidateMinConfidence: 0.58,
+            snoreBoostWindowCount: 1,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 1
+        )
+
+        let bus = EventBus()
+        let engine = RouteDEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: false, hasMicrophoneAccess: true, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(session: session, priors: PriorSnapshot.empty.routePriors)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 0,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(
+                    accelRMS: 0.009,
+                    peakCount: 0,
+                    attitudeChangeRate: 1,
+                    maxAccel: 0.012,
+                    stillRatio: 0.94,
+                    stillDuration: 28
+                ),
+                audio: AudioFeatures(
+                    envNoiseLevel: 0.010,
+                    envNoiseVariance: 0.0001,
+                    breathingRateEstimate: nil,
+                    breathingRateEstimateRaw: 22.7,
+                    frictionEventCount: 0,
+                    isSilent: true,
+                    breathingPresent: false,
+                    breathingConfidence: 0.32,
+                    breathingPeriodicityScore: 0.24,
+                    breathingIntervalCV: 0.34,
+                    breathingBestCorrelation: 0.24,
+                    breathingPrePenaltyConfidence: 0.44,
+                    breathingSuppressionReason: "thresholdFail"
+                ),
+                interaction: InteractionFeatures(
+                    isLocked: true,
+                    timeSinceLastInteraction: 180,
+                    screenWakeCount: 0,
+                    lastInteractionAt: start.addingTimeInterval(-180)
+                ),
+                watch: nil
+            )
+        )
+
+        let confirmedEvent = try #require(bus.recentEvents.first(where: { $0.routeId == .D && $0.eventType == "confirmedSleep" }))
+        #expect(confirmedEvent.payload["breathingRate"] == "none")
+    }
+
     @Test("Route D rejects breathing support when playback leakage is high")
     @MainActor
     func routeDRejectsPlaybackLeakage() async throws {
@@ -1028,6 +1103,10 @@ struct SleepDetectionPOCTests {
         #expect(decoded.breathingSuppressionReason == nil)
         #expect(decoded.playbackLeakageScore == 0)
         #expect(decoded.snoreCandidateCount == 0)
+        #expect(decoded.snoreCandidateCountRaw == nil)
+        #expect(decoded.snoreSecondsRaw == nil)
+        #expect(decoded.snoreConfidenceMaxRaw == nil)
+        #expect(decoded.snoreSuppressionReason == nil)
     }
 
     @Test("RouteDParameters decodes old settings JSON without new thresholds")
@@ -1753,7 +1832,7 @@ struct SleepDetectionPOCTests {
         prediction = try #require(engine.currentPrediction())
         #expect(prediction.confidence == .confirmed)
         #expect(prediction.predictedSleepOnset == start.addingTimeInterval(30))
-        #expect(prediction.confirmedAt == start.addingTimeInterval(390))
+        #expect(prediction.confirmedAt == start.addingTimeInterval(330))
         let confirm = try #require(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "confirmedSleep" })
         #expect(confirm.payload["confirmType"] == "behavioralFallback")
     }
@@ -1850,6 +1929,88 @@ struct SleepDetectionPOCTests {
         #expect(prediction.confidence == .candidate || prediction.confidence == .suspected)
         #expect(prediction.confirmedAt == nil)
         #expect(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "confirmedSleep" } == nil)
+    }
+
+    @Test("Route E behavioral fallback can confirm near default sleep target without physiology priors")
+    @MainActor
+    func routeEBehavioralFallbackWorksWithoutPhysiologyPriors() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            wristActiveResetWindowCount: 2,
+            hrConfirmSampleCount: 2,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 2,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 3,
+            extendedConfirmWindowCount: 5,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let bus = EventBus()
+        let engine = RouteEEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(session: session, priors: PriorSnapshot.empty.routePriors)
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 400,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(accelRMS: 0.005, peakCount: 0, attitudeChangeRate: 0, maxAccel: 0.01, stillRatio: 1, stillDuration: 30),
+                audio: nil,
+                interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 300, screenWakeCount: 0, lastInteractionAt: start.addingTimeInterval(-270)),
+                watch: nil
+            )
+        )
+
+        func watchWindow(id: Int, startOffset: TimeInterval, endOffset: TimeInterval, hr: Double) -> FeatureWindow {
+            FeatureWindow(
+                windowId: id,
+                startTime: start.addingTimeInterval(startOffset),
+                endTime: start.addingTimeInterval(endOffset),
+                duration: endOffset - startOffset,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.01,
+                    wristStillDuration: endOffset - startOffset,
+                    heartRate: hr,
+                    heartRateSampleDate: start.addingTimeInterval(endOffset - 5),
+                    heartRateTrend: .stable,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        }
+
+        for (index, hr) in [60.0, 60.0, 59.0, 60.0, 60.0, 59.0].enumerated() {
+            let startOffset = 30 + Double(index) * 60
+            let endOffset = startOffset + 60
+            engine.onWindow(watchWindow(id: index, startOffset: startOffset, endOffset: endOffset, hr: hr))
+        }
+
+        let prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.confirmedAt == start.addingTimeInterval(390))
+        let confirm = try #require(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "confirmedSleep" })
+        #expect(confirm.payload["confirmType"] == "behavioralFallback")
     }
 
     @Test("Route E rejects after repeated watch-motion misses during candidate")

@@ -1029,7 +1029,7 @@ final class RouteDEngine: RouteEngine {
                         "candidateAt": candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "fusionWindows": "\(consecutiveFusionWindows)",
                         "noise": String(format: "%.3f", audio.envNoiseLevel),
-                        "breathingRate": (audio.breathingRateEstimate ?? audio.breathingRateEstimateRaw).map { String(format: "%.1f", $0) } ?? "none",
+                        "breathingRate": audio.breathingRateEstimate.map { String(format: "%.1f", $0) } ?? "none",
                         "snoreCount": "\(audio.snoreCandidateCount)"
                     ]
                 )
@@ -1063,7 +1063,7 @@ final class RouteDEngine: RouteEngine {
                         "actionReadyAt": actionReadyAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "method": "multimodalFusion",
                         "fusionWindows": "\(consecutiveFusionWindows)",
-                        "breathingRate": (audio.breathingRateEstimate ?? audio.breathingRateEstimateRaw).map { String(format: "%.1f", $0) } ?? "none",
+                        "breathingRate": audio.breathingRateEstimate.map { String(format: "%.1f", $0) } ?? "none",
                         "snoreCount": "\(audio.snoreCandidateCount)"
                     ]
                 )
@@ -1337,7 +1337,15 @@ final class RouteDEngine: RouteEngine {
             let suppression = audio.breathingSuppressionReason.map { " (\($0))" } ?? ""
             breathingSummary = "breathing \(audio.breathingConfidence.formatted2)\(suppression)"
         }
-        let snoreSummary = snoreSupport ? "snore \(audio.snoreCandidateCount)" : "snore 0"
+        let snoreSummary: String
+        if snoreSupport {
+            snoreSummary = "snore \(audio.snoreCandidateCount)"
+        } else if let rawCount = audio.snoreCandidateCountRaw, rawCount > 0 {
+            let suppression = audio.snoreSuppressionReason.map { " (\($0))" } ?? ""
+            snoreSummary = "snore raw \(rawCount)\(suppression)"
+        } else {
+            snoreSummary = "snore 0"
+        }
         return "Waiting for sleep audio evidence. Motion \(motion.accelRMS.formatted3), audio \(audio.envNoiseLevel.formatted3), \(breathingSummary), \(snoreSummary), inactive \(Int(interaction.timeSinceLastInteraction / 60)) min"
     }
 
@@ -1758,8 +1766,7 @@ final class RouteEEngine: RouteEngine {
             let softHeartRateMet = isSoftHeartRateQualified(
                 trend: heartRateTrend,
                 heartRate: watch.heartRate,
-                sleepTarget: sleepTarget,
-                hasPhysiologyPriors: priors.preSleepHRBaseline != nil || priors.sleepHRTarget != nil
+                sleepTarget: sleepTarget
             )
             let interactionMet = interactionSatisfied(
                 at: window.endTime,
@@ -2284,10 +2291,9 @@ final class RouteEEngine: RouteEngine {
     private func isSoftHeartRateQualified(
         trend: WatchFeatures.HRTrend,
         heartRate: Double?,
-        sleepTarget: Double?,
-        hasPhysiologyPriors: Bool
+        sleepTarget: Double?
     ) -> Bool {
-        guard hasPhysiologyPriors, let heartRate, let sleepTarget, trend != .rising else { return false }
+        guard let heartRate, let sleepTarget, trend != .rising else { return false }
         return heartRate <= sleepTarget + 1.0
     }
 
