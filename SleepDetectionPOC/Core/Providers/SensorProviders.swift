@@ -2068,10 +2068,13 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         let rms: Double
         let peak: Double
         let respiratoryProxy: Double
+        let respiratoryContrastProxy: Double
+        let respiratoryCentroidProxy: Double
         let lowBandRatio: Double
         let spectralCentroidHz: Double
         let tonalityScore: Double
         let zeroCrossingRate: Double
+        let peakToRMSRatio: Double
         let snoreLikeScore: Double
     }
 
@@ -2089,9 +2092,44 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
     private struct SnoreEstimate: Sendable {
         let candidateCount: Int
+        let rawCandidateCount: Int
         let seconds: Double
+        let rawSeconds: Double
         let confidenceMax: Double
+        let rawConfidenceMax: Double
         let lowBandRatio: Double
+        let suppressionReason: String?
+    }
+
+    private struct BreathingTrackState: Sendable {
+        var consecutiveQualifiedWindows = 0
+        var consecutiveFailedWindows = 0
+        var stablePresent = false
+        var latchedRateEstimate: Double?
+        var latchedConfidence = 0.0
+        var latchedPeriodicityScore = 0.0
+        var latchedIntervalCV: Double?
+        var latchedBestCorrelation = 0.0
+        var latchedPrePenaltyConfidence = 0.0
+
+        mutating func reset() {
+            self = .init()
+        }
+    }
+
+    private struct WindowMetrics: Sendable {
+        let meanRMS: Double
+        let variance: Double
+        let avgPeak: Double
+        let frictionEvents: Int
+        let isSilent: Bool
+        let frameInterval: TimeInterval
+        let meanLowBandRatio: Double
+        let meanTonality: Double
+        let meanCentroid: Double
+        let highCentroidRatio: Double
+        let disturbanceScore: Double
+        let playbackLeakageScore: Double
     }
 
     private struct RouteState: Sendable {
@@ -2177,6 +2215,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
     private let sessionStrategy: AudioSessionStrategyKind
     private let bundledPlaybackController: BundledPlaybackController
     private let samples: ThreadSafeArray<AudioFrame>
+    private let breathingTrackState: ThreadSafeBox<BreathingTrackState>
     private let runtimeState: ThreadSafeBox<RuntimeState>
     private let rawCaptureStorage: ThreadSafeBox<RawCaptureStorage>
     private let managementQueue = DispatchQueue(label: "com.rickluo.SleepDetectionPOC.audio.live")
@@ -2196,6 +2235,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             fileExtension: "mp3"
         )
         self.samples = ThreadSafeArray(maxSize: maxSamples)
+        self.breathingTrackState = ThreadSafeBox(BreathingTrackState())
         self.runtimeState = ThreadSafeBox(RuntimeState())
         self.rawCaptureStorage = ThreadSafeBox(RawCaptureStorage())
         self.observerTokens = ThreadSafeBox([])
@@ -2211,6 +2251,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
     func start(session: Session) throws {
         samples.removeAll()
+        breathingTrackState.write { $0.reset() }
 
         guard PermissionHelper.microphoneGranted() else {
             throw SensorProviderError.microphonePermissionDenied
@@ -2263,6 +2304,7 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
     func stop() {
         managementQueue.sync {
             bundledPlaybackController.stop()
+            breathingTrackState.write { $0.reset() }
             let routeState = currentRouteState()
             runtimeState.write { state in
                 state.wantsCapture = false
@@ -2416,8 +2458,61 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         }
 
         let orderedFrames = currentFrames.sorted { $0.timestamp < $1.timestamp }
-        let rmsValues = currentFrames.map(\.rms)
-        let peaks = currentFrames.map(\.peak)
+        let metrics = Self.computeWindowMetrics(from: orderedFrames, fallbackDuration: fallbackDuration)
+        let breathingEstimate = Self.estimateBreathing(
+            from: orderedFrames,
+            fallbackDuration: fallbackDuration,
+            isSilent: metrics.isSilent,
+            disturbanceScore: metrics.disturbanceScore,
+            playbackLeakageScore: metrics.playbackLeakageScore,
+            meanLowBandRatio: metrics.meanLowBandRatio
+        )
+        let stabilizedBreathingEstimate = shouldDrain
+            ? stabilizeBreathingEstimate(breathingEstimate)
+            : breathingEstimate
+        let snoreEstimate = Self.estimateSnore(
+            from: orderedFrames,
+            fallbackDuration: fallbackDuration,
+            meanRMS: metrics.meanRMS,
+            playbackLeakageScore: metrics.playbackLeakageScore
+        )
+
+        return (
+            AudioFeatures(
+                envNoiseLevel: metrics.meanRMS,
+                envNoiseVariance: metrics.variance,
+                breathingRateEstimate: stabilizedBreathingEstimate.rateEstimate,
+                breathingRateEstimateRaw: breathingEstimate.rawRateEstimate,
+                frictionEventCount: metrics.frictionEvents,
+                isSilent: metrics.isSilent,
+                breathingPresent: stabilizedBreathingEstimate.present,
+                breathingConfidence: stabilizedBreathingEstimate.confidence,
+                breathingPeriodicityScore: stabilizedBreathingEstimate.periodicityScore,
+                breathingIntervalCV: stabilizedBreathingEstimate.intervalCV,
+                breathingBestCorrelation: stabilizedBreathingEstimate.bestCorrelation,
+                breathingPrePenaltyConfidence: stabilizedBreathingEstimate.prePenaltyConfidence,
+                breathingSuppressionReason: stabilizedBreathingEstimate.suppressionReason,
+                disturbanceScore: metrics.disturbanceScore,
+                playbackLeakageScore: metrics.playbackLeakageScore,
+                snoreCandidateCount: snoreEstimate.candidateCount,
+                snoreCandidateCountRaw: snoreEstimate.rawCandidateCount,
+                snoreSeconds: snoreEstimate.seconds,
+                snoreSecondsRaw: snoreEstimate.rawSeconds,
+                snoreConfidenceMax: snoreEstimate.confidenceMax,
+                snoreConfidenceMaxRaw: snoreEstimate.rawConfidenceMax,
+                snoreLowBandRatio: snoreEstimate.lowBandRatio,
+                snoreSuppressionReason: snoreEstimate.suppressionReason
+            ),
+            currentFrames.count
+        )
+    }
+
+    private static func computeWindowMetrics(
+        from frames: [AudioFrame],
+        fallbackDuration: TimeInterval
+    ) -> WindowMetrics {
+        let rmsValues = frames.map(\.rms)
+        let peaks = frames.map(\.peak)
         let meanRMS = rmsValues.reduce(0, +) / Double(rmsValues.count)
         let variance = rmsValues.reduce(0) { partialResult, value in
             partialResult + pow(value - meanRMS, 2)
@@ -2426,58 +2521,86 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         let spikeThreshold = max(meanRMS * 2.4, 0.05)
         let frictionEvents = peaks.filter { $0 >= spikeThreshold }.count
         let isSilent = meanRMS < 0.015 && avgPeak < 0.05
-        let frameInterval = Self.estimateFrameInterval(from: orderedFrames, fallbackDuration: fallbackDuration)
-        let meanLowBandRatio = orderedFrames.map(\.lowBandRatio).reduce(0, +) / Double(orderedFrames.count)
-        let meanTonality = orderedFrames.map(\.tonalityScore).reduce(0, +) / Double(orderedFrames.count)
-        let meanCentroid = orderedFrames.map(\.spectralCentroidHz).reduce(0, +) / Double(orderedFrames.count)
+        let frameInterval = estimateFrameInterval(from: frames, fallbackDuration: fallbackDuration)
+        let meanLowBandRatio = frames.map(\.lowBandRatio).reduce(0, +) / Double(frames.count)
+        let meanTonality = frames.map(\.tonalityScore).reduce(0, +) / Double(frames.count)
+        let meanCentroid = frames.map(\.spectralCentroidHz).reduce(0, +) / Double(frames.count)
         let highCentroidRatio = Double(
-            orderedFrames.filter { $0.spectralCentroidHz > 1_600 || $0.zeroCrossingRate > 0.18 }.count
-        ) / Double(orderedFrames.count)
-        let varianceNorm = Self.clamp(variance / 0.0012)
-        let frictionRate = Self.clamp(Double(frictionEvents) * frameInterval / max(1, fallbackDuration / 4))
-        let disturbanceScore = Self.clamp(varianceNorm * 0.45 + frictionRate * 0.35 + highCentroidRatio * 0.20)
-        let tonalLeakage = Self.clamp((meanTonality - 0.58) / 0.30)
-        let centroidLeakage = Self.clamp((meanCentroid - 900) / 1_200)
-        let playbackLeakageScore = Self.clamp(tonalLeakage * (0.55 + 0.45 * centroidLeakage))
-        let breathingEstimate = Self.estimateBreathing(
-            from: orderedFrames,
-            fallbackDuration: fallbackDuration,
-            isSilent: isSilent,
-            disturbanceScore: disturbanceScore,
-            playbackLeakageScore: playbackLeakageScore,
-            meanLowBandRatio: meanLowBandRatio
-        )
-        let snoreEstimate = Self.estimateSnore(
-            from: orderedFrames,
-            fallbackDuration: fallbackDuration,
+            frames.filter { $0.spectralCentroidHz > 1_600 || $0.zeroCrossingRate > 0.18 }.count
+        ) / Double(frames.count)
+        let varianceNorm = clamp(variance / 0.0012)
+        let frictionRate = clamp(Double(frictionEvents) * frameInterval / max(1, fallbackDuration / 4))
+        let disturbanceScore = clamp(varianceNorm * 0.45 + frictionRate * 0.35 + highCentroidRatio * 0.20)
+        let tonalLeakage = clamp((meanTonality - 0.58) / 0.30)
+        let centroidLeakage = clamp((meanCentroid - 900) / 1_200)
+        let playbackLeakageScore = clamp(tonalLeakage * (0.55 + 0.45 * centroidLeakage))
+
+        return WindowMetrics(
             meanRMS: meanRMS,
+            variance: variance,
+            avgPeak: avgPeak,
+            frictionEvents: frictionEvents,
+            isSilent: isSilent,
+            frameInterval: frameInterval,
+            meanLowBandRatio: meanLowBandRatio,
+            meanTonality: meanTonality,
+            meanCentroid: meanCentroid,
+            highCentroidRatio: highCentroidRatio,
+            disturbanceScore: disturbanceScore,
             playbackLeakageScore: playbackLeakageScore
         )
+    }
 
-        return (
-            AudioFeatures(
-                envNoiseLevel: meanRMS,
-                envNoiseVariance: variance,
-                breathingRateEstimate: breathingEstimate.rateEstimate,
-                breathingRateEstimateRaw: breathingEstimate.rawRateEstimate,
-                frictionEventCount: frictionEvents,
-                isSilent: isSilent,
-                breathingPresent: breathingEstimate.present,
-                breathingConfidence: breathingEstimate.confidence,
-                breathingPeriodicityScore: breathingEstimate.periodicityScore,
-                breathingIntervalCV: breathingEstimate.intervalCV,
-                breathingBestCorrelation: breathingEstimate.bestCorrelation,
-                breathingPrePenaltyConfidence: breathingEstimate.prePenaltyConfidence,
-                breathingSuppressionReason: breathingEstimate.suppressionReason,
-                disturbanceScore: disturbanceScore,
-                playbackLeakageScore: playbackLeakageScore,
-                snoreCandidateCount: snoreEstimate.candidateCount,
-                snoreSeconds: snoreEstimate.seconds,
-                snoreConfidenceMax: snoreEstimate.confidenceMax,
-                snoreLowBandRatio: snoreEstimate.lowBandRatio
-            ),
-            currentFrames.count
-        )
+    private func stabilizeBreathingEstimate(_ estimate: BreathingEstimate) -> BreathingEstimate {
+        breathingTrackState.write { state in
+            if estimate.present {
+                state.consecutiveQualifiedWindows += 1
+                state.consecutiveFailedWindows = 0
+                if state.consecutiveQualifiedWindows >= 2 || state.stablePresent {
+                    state.stablePresent = true
+                    state.latchedRateEstimate = estimate.rateEstimate ?? state.latchedRateEstimate
+                    state.latchedConfidence = estimate.confidence
+                    state.latchedPeriodicityScore = estimate.periodicityScore
+                    state.latchedIntervalCV = estimate.intervalCV
+                    state.latchedBestCorrelation = estimate.bestCorrelation
+                    state.latchedPrePenaltyConfidence = estimate.prePenaltyConfidence
+                    return estimate
+                }
+
+                return BreathingEstimate(
+                    present: false,
+                    confidence: estimate.confidence,
+                    periodicityScore: estimate.periodicityScore,
+                    rateEstimate: nil,
+                    rawRateEstimate: estimate.rawRateEstimate,
+                    intervalCV: estimate.intervalCV,
+                    bestCorrelation: estimate.bestCorrelation,
+                    prePenaltyConfidence: estimate.prePenaltyConfidence,
+                    suppressionReason: "hysteresisWarmup"
+                )
+            }
+
+            state.consecutiveQualifiedWindows = 0
+            if state.stablePresent {
+                state.consecutiveFailedWindows += 1
+                if state.consecutiveFailedWindows < 2 {
+                    return BreathingEstimate(
+                        present: true,
+                        confidence: max(state.latchedConfidence * 0.9, estimate.confidence),
+                        periodicityScore: max(state.latchedPeriodicityScore * 0.9, estimate.periodicityScore),
+                        rateEstimate: state.latchedRateEstimate,
+                        rawRateEstimate: estimate.rawRateEstimate,
+                        intervalCV: state.latchedIntervalCV,
+                        bestCorrelation: max(state.latchedBestCorrelation * 0.9, estimate.bestCorrelation),
+                        prePenaltyConfidence: max(state.latchedPrePenaltyConfidence * 0.9, estimate.prePenaltyConfidence),
+                        suppressionReason: estimate.suppressionReason.map { "hysteresisHold:\($0)" } ?? "hysteresisHold"
+                    )
+                }
+            }
+
+            state.reset()
+            return estimate
+        }
     }
 
     private static func extractFrame(from buffer: AVAudioPCMBuffer) -> AudioFrame? {
@@ -2516,12 +2639,16 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         let highBandPower = bandPowers[5]
         let bandTotal = max(lowBandPower + midBandPower + highBandPower, .leastNonzeroMagnitude)
         let lowBandRatio = lowBandPower / bandTotal
+        let lowMidContrast = lowBandPower / max(midBandPower + highBandPower, .leastNonzeroMagnitude)
         let spectralCentroid = zip(Self.analysisFrequencies, bandPowers).reduce(0.0) { partial, pair in
             partial + pair.0 * pair.1
         } / bandTotal
         let tonalityScore = (bandPowers.max() ?? 0) / bandTotal
         let zeroCrossingRate = Double(zeroCrossings) / Double(max(frameLength - 1, 1))
         let respiratoryProxy = rms * max(lowBandRatio, 0.05)
+        let respiratoryContrastProxy = rms * Self.clamp((lowMidContrast - 0.65) / 1.5)
+        let respiratoryCentroidProxy = rms * max(1 - Self.clamp((spectralCentroid - 850) / 1_350), 0.05)
+        let peakToRMSRatio = peak / max(rms, .leastNonzeroMagnitude)
         let energySupport = Self.clamp((rms - 0.008) / 0.04)
         let lowBandSupport = Self.clamp((lowBandRatio - 0.45) / 0.35)
         let centroidSupport = 1 - Self.clamp((spectralCentroid - 1_400) / 1_600)
@@ -2541,10 +2668,13 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             rms: rms,
             peak: peak,
             respiratoryProxy: respiratoryProxy,
+            respiratoryContrastProxy: respiratoryContrastProxy,
+            respiratoryCentroidProxy: respiratoryCentroidProxy,
             lowBandRatio: lowBandRatio,
             spectralCentroidHz: spectralCentroid,
             tonalityScore: tonalityScore,
             zeroCrossingRate: zeroCrossingRate,
+            peakToRMSRatio: peakToRMSRatio,
             snoreLikeScore: snoreLikeScore
         )
     }
@@ -2558,10 +2688,13 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             rms: frame.rms,
             peak: frame.peak,
             respiratoryProxy: frame.respiratoryProxy,
+            respiratoryContrastProxy: frame.respiratoryContrastProxy,
+            respiratoryCentroidProxy: frame.respiratoryCentroidProxy,
             lowBandRatio: frame.lowBandRatio,
             spectralCentroidHz: frame.spectralCentroidHz,
             tonalityScore: frame.tonalityScore,
             zeroCrossingRate: frame.zeroCrossingRate,
+            peakToRMSRatio: frame.peakToRMSRatio,
             snoreLikeScore: frame.snoreLikeScore
         )
         samples.append(frame)
@@ -2733,7 +2866,16 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
         let frameInterval = estimateFrameInterval(from: frames, fallbackDuration: fallbackDuration)
         let smoothingWindow = max(1, Int(0.25 / frameInterval))
-        let respiratorySeries = movingAverage(frames.map(\.respiratoryProxy), windowSize: smoothingWindow)
+        let respiratorySeriesPrimary = movingAverage(frames.map(\.respiratoryProxy), windowSize: smoothingWindow)
+        let respiratorySeriesContrast = movingAverage(frames.map(\.respiratoryContrastProxy), windowSize: smoothingWindow)
+        let respiratorySeriesCentroid = movingAverage(frames.map(\.respiratoryCentroidProxy), windowSize: smoothingWindow)
+        let respiratorySeries = zip(
+            zip(respiratorySeriesPrimary, respiratorySeriesContrast),
+            respiratorySeriesCentroid
+        ).map { pair in
+            let (combinedPair, centroid) = pair
+            return combinedPair.0 * 0.55 + combinedPair.1 * 0.25 + centroid * 0.20
+        }
         let mean = respiratorySeries.reduce(0, +) / Double(respiratorySeries.count)
         let centered = respiratorySeries.map { $0 - mean }
         let energy = centered.reduce(0) { $0 + $1 * $1 }
@@ -2779,7 +2921,21 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
 
         let stability = intervalCV.map { clamp(1 - ($0 / 0.6)) } ?? 0.25
         let lowBandSupport = clamp((meanLowBandRatio - 0.30) / 0.40)
-        let prePenaltyConfidence = clamp(bestCorrelation * 0.55 + stability * 0.25 + lowBandSupport * 0.20)
+        let meanContrastProxy = frames.map(\.respiratoryContrastProxy).reduce(0, +) / Double(frames.count)
+        let meanFrameRMS = frames.map(\.rms).reduce(0, +) / Double(frames.count)
+        let contrastSupport = clamp(meanContrastProxy / max(meanFrameRMS, 0.004))
+        let centroidMean = frames.map(\.spectralCentroidHz).reduce(0, +) / Double(frames.count)
+        let centroidVariance = frames.reduce(0) { partialResult, frame in
+            partialResult + pow(frame.spectralCentroidHz - centroidMean, 2)
+        } / Double(frames.count)
+        let centroidStability = clamp(1 - sqrt(centroidVariance) / 650)
+        let prePenaltyConfidence = clamp(
+            bestCorrelation * 0.42 +
+            stability * 0.20 +
+            lowBandSupport * 0.18 +
+            contrastSupport * 0.10 +
+            centroidStability * 0.10
+        )
         var confidence = prePenaltyConfidence
         confidence *= (1 - disturbanceScore * 0.55)
         confidence *= (1 - playbackLeakageScore * 0.75)
@@ -2809,16 +2965,29 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         playbackLeakageScore: Double
     ) -> SnoreEstimate {
         guard fallbackDuration >= 10, frames.count >= 10 else {
-            return SnoreEstimate(candidateCount: 0, seconds: 0, confidenceMax: 0, lowBandRatio: 0)
+            return SnoreEstimate(
+                candidateCount: 0,
+                rawCandidateCount: 0,
+                seconds: 0,
+                rawSeconds: 0,
+                confidenceMax: 0,
+                rawConfidenceMax: 0,
+                lowBandRatio: 0,
+                suppressionReason: nil
+            )
         }
 
         let energyFloor = max(meanRMS * 1.20, 0.01)
         var startIndex: Int?
         var lastQualifiedIndex: Int?
         var confidenceValues: [Double] = []
+        var rawCandidateCount = 0
         var totalSeconds = 0.0
+        var rawSeconds = 0.0
         var maxConfidence = 0.0
+        var rawConfidenceMax = 0.0
         var lowBandAccumulator = 0.0
+        var suppressionCounts: [String: Int] = [:]
 
         func finalizeEvent(endIndex: Int) {
             guard let startIndex else { return }
@@ -2826,12 +2995,42 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
             let duration = eventFrames.reduce(0) { $0 + $1.duration }
             guard duration >= 0.25, duration <= 2.0 else { return }
 
+            rawCandidateCount += 1
+            rawSeconds += duration
             let meanScore = eventFrames.map(\.snoreLikeScore).reduce(0, +) / Double(eventFrames.count)
             let meanLowBandRatio = eventFrames.map(\.lowBandRatio).reduce(0, +) / Double(eventFrames.count)
             let meanCentroid = eventFrames.map(\.spectralCentroidHz).reduce(0, +) / Double(eventFrames.count)
-            let confidence = clamp(meanScore * (1 - playbackLeakageScore * 0.60))
+            let meanZeroCrossing = eventFrames.map(\.zeroCrossingRate).reduce(0, +) / Double(eventFrames.count)
+            let meanPeakToRMS = eventFrames.map(\.peakToRMSRatio).reduce(0, +) / Double(eventFrames.count)
+            let centroidRange = (eventFrames.map(\.spectralCentroidHz).max() ?? meanCentroid) - (eventFrames.map(\.spectralCentroidHz).min() ?? meanCentroid)
+            let centroidJitter = zip(eventFrames.dropFirst(), eventFrames).reduce(0.0) { partialResult, pair in
+                partialResult + abs(pair.0.spectralCentroidHz - pair.1.spectralCentroidHz)
+            } / Double(max(eventFrames.count - 1, 1))
+            let burstiness = clamp((meanPeakToRMS - 3.2) / 3.0)
+            let scratchiness = clamp((meanZeroCrossing - 0.09) / 0.16)
+            let spectralVolatility = clamp((centroidRange / 900) * 0.6 + (centroidJitter / 600) * 0.4)
+            let frictionLikeScore = clamp(burstiness * 0.40 + scratchiness * 0.25 + spectralVolatility * 0.35)
+            let confidence = clamp(meanScore * (1 - playbackLeakageScore * 0.60) * (1 - frictionLikeScore * 0.75))
+            rawConfidenceMax = max(rawConfidenceMax, confidence)
 
-            guard meanLowBandRatio >= 0.42, meanCentroid <= 1_500, confidence >= 0.45 else { return }
+            let suppressionReason: String?
+            if meanLowBandRatio < 0.42 {
+                suppressionReason = "lowBandTooWeak"
+            } else if meanCentroid > 1_500 {
+                suppressionReason = "centroidTooHigh"
+            } else if frictionLikeScore >= 0.45 {
+                suppressionReason = "frictionLike"
+            } else if confidence < 0.45 {
+                suppressionReason = "confidenceTooLow"
+            } else {
+                suppressionReason = nil
+            }
+
+            if let suppressionReason {
+                suppressionCounts[suppressionReason, default: 0] += 1
+                return
+            }
+
             confidenceValues.append(confidence)
             totalSeconds += duration
             maxConfidence = max(maxConfidence, confidence)
@@ -2867,14 +3066,30 @@ final class LiveAudioProvider: AudioProvider, @unchecked Sendable {
         }
 
         guard !confidenceValues.isEmpty else {
-            return SnoreEstimate(candidateCount: 0, seconds: 0, confidenceMax: 0, lowBandRatio: 0)
+            let dominantSuppressionReason = suppressionCounts.max { lhs, rhs in
+                lhs.value < rhs.value
+            }?.key
+            return SnoreEstimate(
+                candidateCount: 0,
+                rawCandidateCount: rawCandidateCount,
+                seconds: 0,
+                rawSeconds: rawSeconds,
+                confidenceMax: 0,
+                rawConfidenceMax: rawConfidenceMax,
+                lowBandRatio: 0,
+                suppressionReason: dominantSuppressionReason
+            )
         }
 
         return SnoreEstimate(
             candidateCount: confidenceValues.count,
+            rawCandidateCount: rawCandidateCount,
             seconds: totalSeconds,
+            rawSeconds: rawSeconds,
             confidenceMax: maxConfidence,
-            lowBandRatio: lowBandAccumulator / Double(confidenceValues.count)
+            rawConfidenceMax: rawConfidenceMax,
+            lowBandRatio: lowBandAccumulator / Double(confidenceValues.count),
+            suppressionReason: nil
         )
     }
 

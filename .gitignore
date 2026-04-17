@@ -7,3 +7,14 @@ Result/
 result/
 assets/0001ZM20251208_A.mp3
 AGENTS.md
+.omx/
+.codex/*
+!.codex/agents/
+!.codex/agents/**
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/.system/**
+!.codex/prompts/
+!.codex/prompts/**
+analysis/__pycache__/
+*.pyc
