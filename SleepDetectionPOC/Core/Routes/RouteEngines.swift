@@ -488,6 +488,7 @@ final class RouteCEngine: RouteEngine {
     private let eventBus: EventBus
     private var prediction: RoutePrediction?
     private var motionHistory: CircularBuffer<MotionFeatures>
+    private var effectiveParameters: RouteCParameters
     private var state: RouteCState = .monitoring
     private var consecutiveStillWindows = 0
     private var qualifiedCandidateWindows = 0
@@ -502,6 +503,7 @@ final class RouteCEngine: RouteEngine {
         self.settings = settings
         self.eventBus = eventBus
         self.motionHistory = CircularBuffer(capacity: maxHistorySize)
+        self.effectiveParameters = settings.routeCParameters
     }
 
     func canRun(condition: DeviceCondition, priorLevel: PriorLevel) -> Bool {
@@ -510,6 +512,7 @@ final class RouteCEngine: RouteEngine {
 
     func start(session: Session, priors: RoutePriors) {
         motionHistory.removeAll()
+        effectiveParameters = resolvedParameters(priors: priors)
         state = .monitoring
         consecutiveStillWindows = 0
         qualifiedCandidateWindows = 0
@@ -531,7 +534,7 @@ final class RouteCEngine: RouteEngine {
 
     func onWindow(_ window: FeatureWindow) {
         guard let motion = window.motion else { return }
-        let parameters = settings.routeCParameters
+        let parameters = effectiveParameters
 
         motionHistory.appendOverwrite(motion)
         guard state != .confirmed else { return }
@@ -698,7 +701,7 @@ final class RouteCEngine: RouteEngine {
     }
 
     private func applyMinorDisturbance(window: FeatureWindow) {
-        accumulatedPenaltyWindows += settings.routeCParameters.minorDisturbancePenaltyWindows
+        accumulatedPenaltyWindows += effectiveParameters.minorDisturbancePenaltyWindows
         updateCandidatePrediction(
             confidence: .candidate,
             updatedAt: window.endTime,
@@ -710,7 +713,7 @@ final class RouteCEngine: RouteEngine {
                 eventType: "custom.candidatePenaltyApplied",
                 payload: [
                     "candidateTime": ISO8601DateFormatter.cached.string(from: candidateEnteredTime ?? window.startTime),
-                    "penaltyWindows": "\(settings.routeCParameters.minorDisturbancePenaltyWindows)",
+                    "penaltyWindows": "\(effectiveParameters.minorDisturbancePenaltyWindows)",
                     "requiredWindows": "\(requiredCandidateWindows())",
                     "qualifiedWindows": "\(qualifiedCandidateWindows)",
                     "accelRMS": String(format: "%.3f", window.motion?.accelRMS ?? 0),
@@ -821,7 +824,18 @@ final class RouteCEngine: RouteEngine {
     }
 
     private func requiredCandidateWindows() -> Int {
-        settings.routeCParameters.confirmWindowCount + accumulatedPenaltyWindows
+        effectiveParameters.confirmWindowCount + accumulatedPenaltyWindows
+    }
+
+    private func resolvedParameters(priors: RoutePriors) -> RouteCParameters {
+        guard let routeCPrior = priors.routeCPrior else {
+            return settings.routeCParameters
+        }
+        var parameters = settings.routeCParameters
+        parameters.stillWindowThreshold = routeCPrior.stillWindowThreshold
+        parameters.confirmWindowCount = routeCPrior.confirmWindowCount
+        parameters.significantMovementCooldownMinutes = routeCPrior.significantMovementCooldownMinutes
+        return parameters
     }
 
     private func elapsedCandidateWindows(for window: FeatureWindow) -> Int {

@@ -236,6 +236,272 @@ struct SleepDetectionPOCTests {
         #expect(snapshot.sleepSampleCount == 3)
     }
 
+    @Test("Prior computer switches onset priors to resolved session anchors at three anchors")
+    func priorComputerUsesSessionAnchorsAtThreshold() {
+        let formatter = ISO8601DateFormatter()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let rawSleepSamples = [
+            SleepSample(startDate: formatter.date(from: "2026-04-01T22:30:00Z")!, endDate: formatter.date(from: "2026-04-01T22:50:00Z")!, sourceBundle: nil, isUserEntered: false),
+            SleepSample(startDate: formatter.date(from: "2026-04-02T22:30:00Z")!, endDate: formatter.date(from: "2026-04-02T22:50:00Z")!, sourceBundle: nil, isUserEntered: false),
+            SleepSample(startDate: formatter.date(from: "2026-04-03T22:30:00Z")!, endDate: formatter.date(from: "2026-04-03T22:50:00Z")!, sourceBundle: nil, isUserEntered: false)
+        ]
+        let anchors = [
+            SessionSleepAnchor(sessionId: UUID(), sessionStartTime: formatter.date(from: "2026-04-01T00:30:00Z")!, sleepOnset: formatter.date(from: "2026-04-01T01:15:00Z")!, interrupted: false),
+            SessionSleepAnchor(sessionId: UUID(), sessionStartTime: formatter.date(from: "2026-04-02T00:30:00Z")!, sleepOnset: formatter.date(from: "2026-04-02T01:15:00Z")!, interrupted: false),
+            SessionSleepAnchor(sessionId: UUID(), sessionStartTime: formatter.date(from: "2026-04-03T00:30:00Z")!, sleepOnset: formatter.date(from: "2026-04-03T01:15:00Z")!, interrupted: false)
+        ]
+
+        let snapshot = PriorComputer.compute(
+            sleepSamples: rawSleepSamples,
+            heartRateSamples: [],
+            hrvSamples: [],
+            sessionSleepAnchors: anchors,
+            settings: .default,
+            hasHealthKitAccess: true,
+            calendar: calendar
+        )
+
+        #expect(snapshot.level == .P1)
+        #expect(snapshot.sleepSampleCount == 3)
+        #expect(snapshot.routePriors.typicalSleepOnset == ClockTime(hour: 1, minute: 15))
+    }
+
+    @Test("Prior computer keeps raw cold-start onset priors below anchor threshold")
+    func priorComputerKeepsRawOnsetsBelowThreshold() {
+        let formatter = ISO8601DateFormatter()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let rawSleepSamples = [
+            SleepSample(startDate: formatter.date(from: "2026-04-01T22:30:00Z")!, endDate: formatter.date(from: "2026-04-01T22:50:00Z")!, sourceBundle: nil, isUserEntered: false),
+            SleepSample(startDate: formatter.date(from: "2026-04-02T22:30:00Z")!, endDate: formatter.date(from: "2026-04-02T22:50:00Z")!, sourceBundle: nil, isUserEntered: false),
+            SleepSample(startDate: formatter.date(from: "2026-04-03T22:30:00Z")!, endDate: formatter.date(from: "2026-04-03T22:50:00Z")!, sourceBundle: nil, isUserEntered: false)
+        ]
+        let anchors = [
+            SessionSleepAnchor(sessionId: UUID(), sessionStartTime: formatter.date(from: "2026-04-01T00:30:00Z")!, sleepOnset: formatter.date(from: "2026-04-01T01:15:00Z")!, interrupted: false),
+            SessionSleepAnchor(sessionId: UUID(), sessionStartTime: formatter.date(from: "2026-04-02T00:30:00Z")!, sleepOnset: formatter.date(from: "2026-04-02T01:15:00Z")!, interrupted: false)
+        ]
+
+        let snapshot = PriorComputer.compute(
+            sleepSamples: rawSleepSamples,
+            heartRateSamples: [],
+            hrvSamples: [],
+            sessionSleepAnchors: anchors,
+            settings: .default,
+            hasHealthKitAccess: true,
+            calendar: calendar
+        )
+
+        #expect(snapshot.level == .P1)
+        #expect(snapshot.sleepSampleCount == 3)
+        #expect(snapshot.routePriors.typicalSleepOnset == ClockTime(hour: 22, minute: 30))
+    }
+
+    @Test("Prior computer derives raw nightly onset from canonicalized HealthKit timeline")
+    func priorComputerUsesCanonicalizedRawOnsets() {
+        let formatter = ISO8601DateFormatter()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let samples = [
+            SleepSample(
+                startDate: formatter.date(from: "2026-04-01T22:00:00Z")!,
+                endDate: formatter.date(from: "2026-04-01T23:00:00Z")!,
+                sourceBundle: "sleep",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: formatter.date(from: "2026-04-01T22:00:00Z")!,
+                endDate: formatter.date(from: "2026-04-01T22:10:00Z")!,
+                sourceBundle: "awake",
+                isUserEntered: false,
+                state: .awake
+            ),
+            SleepSample(
+                startDate: formatter.date(from: "2026-04-02T22:00:00Z")!,
+                endDate: formatter.date(from: "2026-04-02T23:00:00Z")!,
+                sourceBundle: "sleep",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: formatter.date(from: "2026-04-02T22:00:00Z")!,
+                endDate: formatter.date(from: "2026-04-02T22:10:00Z")!,
+                sourceBundle: "awake",
+                isUserEntered: false,
+                state: .awake
+            ),
+            SleepSample(
+                startDate: formatter.date(from: "2026-04-03T22:00:00Z")!,
+                endDate: formatter.date(from: "2026-04-03T23:00:00Z")!,
+                sourceBundle: "sleep",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: formatter.date(from: "2026-04-03T22:00:00Z")!,
+                endDate: formatter.date(from: "2026-04-03T22:10:00Z")!,
+                sourceBundle: "awake",
+                isUserEntered: false,
+                state: .awake
+            )
+        ]
+
+        let snapshot = PriorComputer.compute(
+            sleepSamples: samples,
+            heartRateSamples: [],
+            hrvSamples: [],
+            settings: .default,
+            hasHealthKitAccess: true,
+            calendar: calendar
+        )
+
+        #expect(snapshot.routePriors.typicalSleepOnset == ClockTime(hour: 22, minute: 10))
+    }
+
+    @Test("Prior computer carries Route C prior without changing existing A/E fields")
+    func priorComputerCarriesRouteCPrior() {
+        let routeCPrior = RouteCPriorConfig(
+            source: .sessionHistoryMotion,
+            profile: .strict,
+            alignedNightCount: 3,
+            stillWindowThreshold: 8,
+            confirmWindowCount: 12,
+            significantMovementCooldownMinutes: 6
+        )
+        let samples = [
+            SleepSample(startDate: Date(timeIntervalSince1970: 1_700_000_000), endDate: Date(timeIntervalSince1970: 1_700_000_600), sourceBundle: nil, isUserEntered: false),
+            SleepSample(startDate: Date(timeIntervalSince1970: 1_700_086_400), endDate: Date(timeIntervalSince1970: 1_700_087_000), sourceBundle: nil, isUserEntered: false),
+            SleepSample(startDate: Date(timeIntervalSince1970: 1_700_172_800), endDate: Date(timeIntervalSince1970: 1_700_173_400), sourceBundle: nil, isUserEntered: false)
+        ]
+
+        let snapshot = PriorComputer.compute(
+            sleepSamples: samples,
+            heartRateSamples: [HeartRateSample(timestamp: Date(timeIntervalSince1970: 1_700_000_000), bpm: 70)],
+            hrvSamples: [],
+            routeCPrior: routeCPrior,
+            settings: .default,
+            hasHealthKitAccess: true
+        )
+
+        #expect(snapshot.routePriors.routeCPrior == routeCPrior)
+        #expect(snapshot.routePriors.typicalSleepOnset != nil)
+        #expect(snapshot.routePriors.preSleepHRBaseline == 70)
+    }
+
+    @Test("Route C motion prior requires at least three aligned nights")
+    func routeCMotionPriorRequiresMinimumAlignedNights() {
+        let provider = SessionBundleRouteCMotionPriorProvider()
+        let bundles = [
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_665_200),
+                placement: .bedSurface,
+                onsetOffset: 8 * 60,
+                motions: routeCHistoricalMotions(profile: .strict)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_751_600),
+                placement: .pillow,
+                onsetOffset: 8 * 60,
+                motions: routeCHistoricalMotions(profile: .strict)
+            )
+        ]
+
+        let prior = provider.routeCPrior(from: bundles, baseParameters: .default)
+        #expect(prior == nil)
+    }
+
+    @Test("Route C motion prior classifies strict from aligned session motion")
+    func routeCMotionPriorClassifiesStrict() throws {
+        let provider = SessionBundleRouteCMotionPriorProvider()
+        let bundles = [
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_665_200),
+                placement: .bedSurface,
+                onsetOffset: 8 * 60,
+                motions: routeCHistoricalMotions(profile: .strict)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_751_600),
+                placement: .pillow,
+                onsetOffset: 8 * 60,
+                motions: routeCHistoricalMotions(profile: .strict)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_838_000),
+                placement: .bedSurface,
+                onsetOffset: 8 * 60,
+                motions: routeCHistoricalMotions(profile: .strict)
+            )
+        ]
+
+        let prior = try #require(provider.routeCPrior(from: bundles, baseParameters: .default))
+        #expect(prior.profile == .strict)
+        #expect(prior.alignedNightCount == 3)
+        #expect(prior.stillWindowThreshold == 8)
+        #expect(prior.confirmWindowCount == 12)
+        #expect(prior.significantMovementCooldownMinutes == 6)
+    }
+
+    @Test("Route C motion prior classifies balanced from aligned session motion")
+    func routeCMotionPriorClassifiesBalanced() throws {
+        let provider = SessionBundleRouteCMotionPriorProvider()
+        let bundles = [
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_665_200),
+                placement: .bedSurface,
+                onsetOffset: 6 * 60,
+                motions: routeCHistoricalMotions(profile: .balanced)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_751_600),
+                placement: .bedSurface,
+                onsetOffset: 6 * 60,
+                motions: routeCHistoricalMotions(profile: .balanced)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_838_000),
+                placement: .pillow,
+                onsetOffset: 6 * 60,
+                motions: routeCHistoricalMotions(profile: .balanced)
+            )
+        ]
+
+        let prior = try #require(provider.routeCPrior(from: bundles, baseParameters: .default))
+        #expect(prior.profile == .balanced)
+        #expect(prior.stillWindowThreshold == 6)
+        #expect(prior.confirmWindowCount == 10)
+        #expect(prior.significantMovementCooldownMinutes == 4)
+    }
+
+    @Test("Route C motion prior classifies relaxed from aligned session motion")
+    func routeCMotionPriorClassifiesRelaxed() throws {
+        let provider = SessionBundleRouteCMotionPriorProvider()
+        let bundles = [
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_665_200),
+                placement: .bedSurface,
+                onsetOffset: 4 * 60,
+                motions: routeCHistoricalMotions(profile: .relaxed)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_751_600),
+                placement: .bedSurface,
+                onsetOffset: 4 * 60,
+                motions: routeCHistoricalMotions(profile: .relaxed)
+            ),
+            routeCHistoricalBundle(
+                start: Date(timeIntervalSince1970: 1_712_838_000),
+                placement: .pillow,
+                onsetOffset: 4 * 60,
+                motions: routeCHistoricalMotions(profile: .relaxed)
+            )
+        ]
+
+        let prior = try #require(provider.routeCPrior(from: bundles, baseParameters: .default))
+        #expect(prior.profile == .relaxed)
+        #expect(prior.stillWindowThreshold == 5)
+        #expect(prior.confirmWindowCount == 8)
+        #expect(prior.significantMovementCooldownMinutes == 3)
+    }
+
     @Test("Prior computer marks Route F as full when HR and HRV history are sufficient")
     func priorComputerRouteFFullReadiness() {
         let calendar = Calendar(identifier: .gregorian)
@@ -385,9 +651,69 @@ struct SleepDetectionPOCTests {
         #expect(payload.overall.first?.routeId == .A)
         #expect(payload.stratified.count == EvaluationDimension.allCases.count)
         #expect(payload.errorTrend.count == 1)
+        #expect(payload.truthResolutionInventory.pending == 0)
+        #expect(payload.truthResolutionInventory.resolvedOnset == 1)
+        #expect(payload.truthResolutionInventory.noQualifyingSleep == 0)
     }
 
-    @Test("Truth evaluator chooses earliest qualifying onset")
+    @Test("Session analytics export includes truth resolution inventory")
+    func sessionAnalyticsTruthResolutionInventory() {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        var pendingSession = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: true, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        pendingSession.status = .pendingTruth
+
+        var labeledSession = pendingSession
+        labeledSession.sessionId = UUID()
+        labeledSession.status = .labeled
+
+        var resolvedSession = pendingSession
+        resolvedSession.sessionId = UUID()
+        resolvedSession.status = .labeled
+
+        let payload = SessionAnalytics.exportPayload(
+            from: [
+                SessionBundle(session: pendingSession, windows: [], events: [], predictions: [], truth: nil),
+                SessionBundle(
+                    session: labeledSession,
+                    windows: [],
+                    events: [],
+                    predictions: [],
+                    truth: TruthRecord(
+                        resolution: .noQualifyingSleep,
+                        healthKitSleepOnset: nil,
+                        healthKitSource: nil,
+                        retrievedAt: start,
+                        errors: [:]
+                    )
+                ),
+                SessionBundle(
+                    session: resolvedSession,
+                    windows: [],
+                    events: [],
+                    predictions: [],
+                    truth: TruthRecord(
+                        resolution: .resolvedOnset,
+                        healthKitSleepOnset: start,
+                        healthKitSource: nil,
+                        retrievedAt: start,
+                        errors: [:]
+                    )
+                )
+            ],
+            now: start
+        )
+
+        #expect(payload.truthResolutionInventory.pending == 1)
+        #expect(payload.truthResolutionInventory.noQualifyingSleep == 1)
+        #expect(payload.truthResolutionInventory.resolvedOnset == 1)
+    }
+
+    @Test("Truth evaluator selects first qualifying post-start sleep and ignores earlier sleep")
     func truthSelection() {
         let session = Session.make(
             startTime: Date(timeIntervalSince1970: 1_700_000_000),
@@ -396,11 +722,120 @@ struct SleepDetectionPOCTests {
             enabledRoutes: RouteId.allCases
         )
         let samples = [
-            SleepSample(startDate: session.startTime.addingTimeInterval(4_000), endDate: session.startTime.addingTimeInterval(4_600), sourceBundle: "A", isUserEntered: false),
-            SleepSample(startDate: session.startTime.addingTimeInterval(3_000), endDate: session.startTime.addingTimeInterval(3_600), sourceBundle: "B", isUserEntered: false)
+            SleepSample(startDate: session.startTime.addingTimeInterval(-3_000), endDate: session.startTime.addingTimeInterval(-2_000), sourceBundle: "B", isUserEntered: false),
+            SleepSample(startDate: session.startTime.addingTimeInterval(4_000), endDate: session.startTime.addingTimeInterval(5_200), sourceBundle: "A", isUserEntered: false)
         ]
         let selected = TruthEvaluator.selectTruth(for: session, from: samples)
-        #expect(selected?.sourceBundle == "B")
+        #expect(selected?.sourceBundle == "A")
+    }
+
+    @Test("HealthKit canonicalizer merges adjacent same-state intervals and keeps awake precedence")
+    func healthKitCanonicalizer() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let samples = [
+            SleepSample(
+                startDate: start,
+                endDate: start.addingTimeInterval(300),
+                sourceBundle: "sleep-a",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: start.addingTimeInterval(300),
+                endDate: start.addingTimeInterval(600),
+                sourceBundle: "sleep-b",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: start.addingTimeInterval(120),
+                endDate: start.addingTimeInterval(180),
+                sourceBundle: "awake",
+                isUserEntered: false,
+                state: .awake
+            )
+        ]
+
+        let canonical = HealthKitSleepCanonicalizer.canonicalize(samples)
+        #expect(canonical.count == 3)
+        let first = canonical[0]
+        let second = canonical[1]
+        let third = canonical[2]
+        #expect(first.state == .asleep)
+        #expect(first.startDate == start)
+        #expect(first.endDate == start.addingTimeInterval(120))
+        #expect(second.state == .awake)
+        #expect(second.startDate == start.addingTimeInterval(120))
+        #expect(second.endDate == start.addingTimeInterval(180))
+        #expect(third.state == .asleep)
+        #expect(third.startDate == start.addingTimeInterval(180))
+        #expect(third.endDate == start.addingTimeInterval(600))
+        #expect(Set(third.sourceBundles) == Set(["sleep-a", "sleep-b"]))
+    }
+
+    @Test("Truth evaluator selects post-awake canonical asleep interval when awake overlaps prior sleep")
+    func truthSelectionUsesCanonicalizedAwakeBoundary() {
+        let session = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_700_000_000),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let samples = [
+            SleepSample(
+                startDate: session.startTime.addingTimeInterval(60),
+                endDate: session.startTime.addingTimeInterval(1_500),
+                sourceBundle: "sleep",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: session.startTime.addingTimeInterval(300),
+                endDate: session.startTime.addingTimeInterval(420),
+                sourceBundle: "awake",
+                isUserEntered: false,
+                state: .awake
+            )
+        ]
+
+        let selected = TruthEvaluator.selectTruth(for: session, from: samples)
+        #expect(selected?.startDate == session.startTime.addingTimeInterval(420))
+        #expect(selected?.endDate == session.startTime.addingTimeInterval(1_500))
+    }
+
+    @Test("Truth evaluator allows no-awake normal-session selection after session start")
+    func truthSelectionWithoutAwakeSegment() {
+        let session = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_700_000_000),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let samples = [
+            SleepSample(startDate: session.startTime.addingTimeInterval(120), endDate: session.startTime.addingTimeInterval(900), sourceBundle: "short", isUserEntered: false),
+            SleepSample(startDate: session.startTime.addingTimeInterval(1_200), endDate: session.startTime.addingTimeInterval(2_400), sourceBundle: "qualifying", isUserEntered: false)
+        ]
+
+        let selected = TruthEvaluator.selectTruth(for: session, from: samples)
+        #expect(selected?.sourceBundle == "qualifying")
+    }
+
+    @Test("Truth evaluator terminalizes to no qualifying sleep after grace period")
+    func truthResolutionDecisionAfterGracePeriod() {
+        let sessionEnd = Date(timeIntervalSince1970: 1_700_000_000)
+        var session = Session.make(
+            startTime: sessionEnd.addingTimeInterval(-3_600),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        session.endTime = sessionEnd
+        session.status = .pendingTruth
+
+        let decision = TruthEvaluator.resolveTruth(
+            for: session,
+            from: [],
+            now: sessionEnd.addingTimeInterval(49 * 60 * 60)
+        )
+
+        #expect(decision == .noQualifyingSleep)
     }
 
     @Test("Session bundle prefers latched timeline predictions for export and error computation")
@@ -737,6 +1172,114 @@ struct SleepDetectionPOCTests {
         #expect(rejectionEvent.payload["signal"] == "interaction")
     }
 
+    @Test("Route C strict prior delays confirmation by increasing conservatism")
+    @MainActor
+    func routeCStrictPriorDelaysConfirmation() async throws {
+        let settings = ExperimentSettings.default
+        let defaultEngine = RouteCEngine(settings: settings)
+        let strictEngine = RouteCEngine(settings: settings)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = routeCTestSession(start: start)
+
+        let strictPrior = RouteCPriorConfig(
+            source: .sessionHistoryMotion,
+            profile: .strict,
+            alignedNightCount: 3,
+            stillWindowThreshold: 8,
+            confirmWindowCount: 12,
+            significantMovementCooldownMinutes: 6
+        )
+
+        defaultEngine.start(session: session, priors: PriorSnapshot.empty.routePriors)
+        strictEngine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P3,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: nil,
+                sleepHRTarget: nil,
+                hrDropThreshold: nil,
+                routeCPrior: strictPrior
+            )
+        )
+
+        let windows = [
+            routeCTestWindow(index: 0, start: start, motion: routeCTestMovementMotion(rms: 0.06, peakCount: 2)),
+            routeCTestWindow(index: 1, start: start, motion: routeCTestMovementMotion(rms: 0.03, peakCount: 2))
+        ] + (2..<12).map { index in
+            routeCTestWindow(index: index, start: start, motion: routeCTestStillMotion(rms: 0.008))
+        }
+
+        windows.forEach { window in
+            defaultEngine.onWindow(window)
+            strictEngine.onWindow(window)
+        }
+
+        let defaultPrediction = try #require(defaultEngine.currentPrediction())
+        let strictPrediction = try #require(strictEngine.currentPrediction())
+
+        #expect(defaultPrediction.confidence == .confirmed)
+        #expect(strictPrediction.confidence != .confirmed)
+        #expect(strictPrediction.confirmedAt == nil)
+    }
+
+    @Test("Route C relaxed prior confirms earlier with the same motion history")
+    @MainActor
+    func routeCRelaxedPriorConfirmsEarlier() async throws {
+        let settings = ExperimentSettings.default
+        let defaultEngine = RouteCEngine(settings: settings)
+        let relaxedEngine = RouteCEngine(settings: settings)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = routeCTestSession(start: start)
+
+        let relaxedPrior = RouteCPriorConfig(
+            source: .sessionHistoryMotion,
+            profile: .relaxed,
+            alignedNightCount: 3,
+            stillWindowThreshold: 5,
+            confirmWindowCount: 8,
+            significantMovementCooldownMinutes: 3
+        )
+
+        defaultEngine.start(session: session, priors: PriorSnapshot.empty.routePriors)
+        relaxedEngine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P3,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: nil,
+                sleepHRTarget: nil,
+                hrDropThreshold: nil,
+                routeCPrior: relaxedPrior
+            )
+        )
+
+        let windows = [
+            routeCTestWindow(index: 0, start: start, motion: routeCTestMovementMotion(rms: 0.06, peakCount: 2))
+        ] + (1..<9).map { index in
+            routeCTestWindow(index: index, start: start, motion: routeCTestStillMotion(rms: 0.008))
+        }
+
+        windows.forEach { window in
+            defaultEngine.onWindow(window)
+            relaxedEngine.onWindow(window)
+        }
+
+        let defaultPrediction = try #require(defaultEngine.currentPrediction())
+        let relaxedPrediction = try #require(relaxedEngine.currentPrediction())
+
+        #expect(defaultPrediction.confidence == .candidate || defaultPrediction.confidence == .suspected)
+        #expect(defaultPrediction.confirmedAt == nil)
+        #expect(relaxedPrediction.confidence == .confirmed)
+        #expect(relaxedPrediction.confirmedAt != nil)
+    }
+
     @Test("Route D stays unavailable when microphone is unavailable")
     @MainActor
     func routeDUnavailableWithoutMicrophone() async throws {
@@ -764,6 +1307,7 @@ struct SleepDetectionPOCTests {
             priorLevel: .P3,
             enabledRoutes: RouteId.allCases
         )
+        session.status = .pendingTruth
         session.interrupted = true
 
         let bundle = SessionBundle(
@@ -786,6 +1330,44 @@ struct SleepDetectionPOCTests {
         #expect(bundle.anomalyTags.contains("sessionInterrupted"))
         #expect(bundle.anomalyTags.contains("truthPending"))
         #expect(bundle.anomalyTags.contains("microphoneUnavailable"))
+    }
+
+    @Test("Session bundle distinguishes pending and no qualifying sleep truth surfaces")
+    func sessionBundleTruthSurfaceSemantics() {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        var pendingSession = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        pendingSession.status = .pendingTruth
+        let pendingBundle = SessionBundle(session: pendingSession, windows: [], events: [], predictions: [], truth: nil)
+        #expect(pendingBundle.sampleQuality == .Q3)
+        #expect(pendingBundle.truthResolutionLabel == "pending")
+        #expect(pendingBundle.truthDisplayValue == "Pending HealthKit truth")
+        #expect(pendingBundle.anomalyTags.contains("truthPending"))
+
+        var resolvedSession = pendingSession
+        resolvedSession.status = .labeled
+        let resolvedBundle = SessionBundle(
+            session: resolvedSession,
+            windows: [],
+            events: [],
+            predictions: [],
+            truth: TruthRecord(
+                resolution: .noQualifyingSleep,
+                healthKitSleepOnset: nil,
+                healthKitSource: nil,
+                retrievedAt: start.addingTimeInterval(49 * 60 * 60),
+                errors: [:]
+            )
+        )
+        #expect(resolvedBundle.sampleQuality == .Q3)
+        #expect(resolvedBundle.truthResolutionLabel == "noQualifyingSleep")
+        #expect(resolvedBundle.truthDisplayValue == "No qualifying sleep after session start")
+        #expect(resolvedBundle.anomalyTags.contains("truthNoQualifyingSleep"))
+        #expect(resolvedBundle.anomalyTags.contains("truthPending") == false)
     }
 
     @Test("Route D confirms with sustained multimodal quietness")
@@ -3655,6 +4237,200 @@ struct SleepDetectionPOCTests {
         #expect(loaded?.timeline == timeline)
     }
 
+    @Test("Repository maps legacy false truth by session status")
+    func repositoryMapsLegacyFalseTruthByStatus() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+
+        var pendingSession = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_712_665_200),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        pendingSession.status = .pendingTruth
+        try await repository.createSession(pendingSession)
+        try writeLegacyTruth(
+            LegacyTruthPayload(
+                hasTruth: false,
+                healthKitSleepOnset: nil,
+                healthKitSource: nil,
+                retrievedAt: pendingSession.startTime.addingTimeInterval(60),
+                errors: [:]
+            ),
+            to: temporaryURL,
+            sessionId: pendingSession.sessionId
+        )
+
+        var labeledSession = pendingSession
+        labeledSession.sessionId = UUID()
+        labeledSession.status = .labeled
+        try await repository.createSession(labeledSession)
+        try writeLegacyTruth(
+            LegacyTruthPayload(
+                hasTruth: false,
+                healthKitSleepOnset: nil,
+                healthKitSource: nil,
+                retrievedAt: labeledSession.startTime.addingTimeInterval(60),
+                errors: [:]
+            ),
+            to: temporaryURL,
+            sessionId: labeledSession.sessionId
+        )
+
+        let pendingBundle = try #require(await repository.loadBundle(sessionId: pendingSession.sessionId))
+        #expect(pendingBundle.truth == nil)
+        #expect(pendingBundle.truthResolution == nil)
+
+        let labeledBundle = try #require(await repository.loadBundle(sessionId: labeledSession.sessionId))
+        #expect(labeledBundle.truth?.effectiveResolution == .noQualifyingSleep)
+        #expect(labeledBundle.truth?.healthKitSleepOnset == nil)
+    }
+
+    @Test("Truth refill terminalizes no qualifying sleep after grace period")
+    func truthRefillTerminalizesAfterGracePeriod() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        let provider = StubSleepHistoryProvider(samples: [])
+        let service = LiveTruthRefillService(sleepHistoryProvider: provider, repository: repository)
+
+        let endTime = Date().addingTimeInterval(-(49 * 60 * 60))
+        var session = Session.make(
+            startTime: endTime.addingTimeInterval(-30 * 60),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        session.endTime = endTime
+        session.status = .pendingTruth
+        try await repository.createSession(session)
+
+        try await service.refillPendingTruths()
+        let bundle = try #require(await repository.loadBundle(sessionId: session.sessionId))
+        #expect(bundle.session.status == .labeled)
+        #expect(bundle.truth?.effectiveResolution == .noQualifyingSleep)
+        #expect(bundle.truth?.healthKitSleepOnset == nil)
+    }
+
+    @Test("Automatic truth refill does not reopen terminal no qualifying sleep")
+    func truthRefillDoesNotReopenTerminalNoQualifyingSleepAutomatically() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        let service = LiveTruthRefillService(
+            sleepHistoryProvider: StubSleepHistoryProvider(
+                samples: [
+                    SleepSample(
+                        startDate: Date().addingTimeInterval(-(40 * 60 * 60)),
+                        endDate: Date().addingTimeInterval(-(40 * 60 * 60) + (20 * 60)),
+                        sourceBundle: "late-sync",
+                        isUserEntered: false
+                    )
+                ]
+            ),
+            repository: repository
+        )
+
+        let startTime = Date().addingTimeInterval(-(41 * 60 * 60))
+        var session = Session.make(
+            startTime: startTime,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        session.status = .labeled
+        session.endTime = startTime.addingTimeInterval(30 * 60)
+        try await repository.createSession(session)
+        try await repository.saveTruth(
+            TruthRecord(
+                resolution: .noQualifyingSleep,
+                healthKitSleepOnset: nil,
+                healthKitSource: nil,
+                retrievedAt: Date(),
+                errors: [:]
+            ),
+            for: session.sessionId
+        )
+
+        try await service.refillPendingTruths()
+        let bundle = try #require(await repository.loadBundle(sessionId: session.sessionId))
+        #expect(bundle.truth?.effectiveResolution == .noQualifyingSleep)
+        #expect(bundle.truth?.healthKitSleepOnset == nil)
+    }
+
+    @Test("Manual truth refresh can overwrite terminal no qualifying sleep")
+    func manualTruthRefreshCanOverwriteTerminalNoQualifyingSleep() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        let startTime = Date().addingTimeInterval(-(41 * 60 * 60))
+        let qualifyingSleep = SleepSample(
+            startDate: startTime.addingTimeInterval(20 * 60),
+            endDate: startTime.addingTimeInterval(40 * 60),
+            sourceBundle: "late-sync",
+            isUserEntered: false
+        )
+        let service = LiveTruthRefillService(
+            sleepHistoryProvider: StubSleepHistoryProvider(samples: [qualifyingSleep]),
+            repository: repository
+        )
+
+        var session = Session.make(
+            startTime: startTime,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        session.status = .labeled
+        session.endTime = startTime.addingTimeInterval(30 * 60)
+        try await repository.createSession(session)
+        try await repository.saveTruth(
+            TruthRecord(
+                resolution: .noQualifyingSleep,
+                healthKitSleepOnset: nil,
+                healthKitSource: nil,
+                retrievedAt: Date(),
+                errors: [:]
+            ),
+            for: session.sessionId
+        )
+
+        try await service.refreshTruths()
+        let bundle = try #require(await repository.loadBundle(sessionId: session.sessionId))
+        #expect(bundle.truth?.effectiveResolution == .resolvedOnset)
+        let loadedOnset = try #require(bundle.truth?.healthKitSleepOnset)
+        #expect(abs(loadedOnset.timeIntervalSince(qualifyingSleep.startDate)) < 1)
+    }
+
+    @Test("Summary export includes truth resolution column")
+    func summaryExportIncludesTruthResolution() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        let exportService = LiveExportService(repository: repository)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        var session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        session.status = .labeled
+        try await repository.createSession(session)
+        try await repository.saveTruth(
+            TruthRecord(
+                resolution: .noQualifyingSleep,
+                healthKitSleepOnset: nil,
+                healthKitSource: nil,
+                retrievedAt: start.addingTimeInterval(49 * 60 * 60),
+                errors: [:]
+            ),
+            for: session.sessionId
+        )
+
+        let url = try await exportService.exportSummaryCSV()
+        let csv = try String(contentsOf: url)
+        #expect(csv.contains("healthkit_truth_resolution"))
+        #expect(csv.contains("noQualifyingSleep"))
+    }
+
     @Test("Route F confirms from passive HealthKit HR and HRV samples")
     @MainActor
     func routeFConfirmsFromPassivePhysiology() async throws {
@@ -3929,6 +4705,107 @@ private func routeCTestInteraction(
     )
 }
 
+private func routeCHistoricalBundle(
+    start: Date,
+    placement: PhonePlacement,
+    onsetOffset: TimeInterval,
+    motions: [MotionFeatures]
+) -> SessionBundle {
+    var session = Session.make(
+        startTime: start,
+        deviceCondition: DeviceCondition(
+            hasWatch: false,
+            watchReachable: false,
+            hasHealthKitAccess: true,
+            hasMicrophoneAccess: false,
+            hasMotionAccess: true
+        ),
+        priorLevel: .P1,
+        enabledRoutes: RouteId.allCases
+    )
+    session.status = .labeled
+    session.phonePlacement = placement.rawValue
+
+    let onset = start.addingTimeInterval(onsetOffset)
+    let windows = motions.enumerated().map { index, motion in
+        FeatureWindow(
+            windowId: index,
+            startTime: start.addingTimeInterval(Double(index) * 30),
+            endTime: start.addingTimeInterval(Double(index + 1) * 30),
+            duration: 30,
+            source: .iphone,
+            motion: motion,
+            audio: nil,
+            interaction: nil,
+            watch: nil
+        )
+    }
+
+    return SessionBundle(
+        session: session,
+        windows: windows,
+        events: [],
+        predictions: [],
+        truth: TruthRecord(
+            resolution: .resolvedOnset,
+            healthKitSleepOnset: onset,
+            healthKitSource: "test",
+            retrievedAt: onset.addingTimeInterval(12 * 60 * 60),
+            errors: [:]
+        )
+    )
+}
+
+private func routeCHistoricalMotions(profile: RouteCPriorProfile) -> [MotionFeatures] {
+    switch profile {
+    case .strict:
+        return [
+            routeCTestMovementMotion(rms: 0.09, peakCount: 3),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008)
+        ]
+    case .balanced:
+        return [
+            routeCTestMovementMotion(rms: 0.09, peakCount: 3),
+            routeCTestMovementMotion(rms: 0.04, peakCount: 1),
+            routeCTestMovementMotion(rms: 0.04, peakCount: 1),
+            routeCTestMovementMotion(rms: 0.04, peakCount: 1),
+            routeCTestMovementMotion(rms: 0.04, peakCount: 1),
+            routeCTestMovementMotion(rms: 0.09, peakCount: 2),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008)
+        ]
+    case .relaxed:
+        return [
+            routeCTestMovementMotion(rms: 0.05, peakCount: 1),
+            routeCTestMovementMotion(rms: 0.05, peakCount: 1),
+            routeCTestMovementMotion(rms: 0.09, peakCount: 2),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestStillMotion(rms: 0.008),
+            routeCTestMovementMotion(rms: 0.09, peakCount: 2)
+        ]
+    }
+}
+
 private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {
     let providerId = "watch.test"
 
@@ -3977,4 +4854,32 @@ private extension WatchRuntimeSnapshot {
         transportMode = .bootstrap
         lastError = nil
     }
+}
+
+private struct LegacyTruthPayload: Codable {
+    var hasTruth: Bool
+    var healthKitSleepOnset: Date?
+    var healthKitSource: String?
+    var retrievedAt: Date
+    var errors: [String: RouteErrorRecord]
+}
+
+private actor StubSleepHistoryProvider: SleepHistoryProvider {
+    private let samples: [SleepSample]
+
+    init(samples: [SleepSample]) {
+        self.samples = samples
+    }
+
+    func fetchRecentSleepSamples(days: Int) async -> [SleepSample] {
+        samples
+    }
+}
+
+private func writeLegacyTruth(_ payload: LegacyTruthPayload, to baseURL: URL, sessionId: UUID) throws {
+    let directory = baseURL.appendingPathComponent(sessionId.uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let url = directory.appendingPathComponent("truth.json")
+    let data = try JSONEncoder.pretty.encode(payload)
+    try data.write(to: url, options: .atomic)
 }

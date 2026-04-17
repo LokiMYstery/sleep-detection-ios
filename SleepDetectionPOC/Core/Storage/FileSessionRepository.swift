@@ -88,7 +88,10 @@ actor FileSessionRepository: SessionRepository {
             let windows = try readJSONLines(FeatureWindow.self, from: directory.appendingPathComponent("windows.jsonl"))
             let events = try readJSONLines(RouteEvent.self, from: directory.appendingPathComponent("events.jsonl"))
             let predictions = try readPredictions(from: directory.appendingPathComponent("predictions.json"))
-            let truth = try readTruth(from: directory.appendingPathComponent("truth.json"))
+            let truth = normalizeTruth(
+                try readTruth(from: directory.appendingPathComponent("truth.json")),
+                for: session
+            )
             let timeline = try readTimeline(from: directory.appendingPathComponent("timeline.json"))
             return SessionBundle(
                 session: session,
@@ -110,7 +113,10 @@ actor FileSessionRepository: SessionRepository {
         let windows = try readJSONLines(FeatureWindow.self, from: directory.appendingPathComponent("windows.jsonl"))
         let events = try readJSONLines(RouteEvent.self, from: directory.appendingPathComponent("events.jsonl"))
         let predictions = try readPredictions(from: directory.appendingPathComponent("predictions.json"))
-        let truth = try readTruth(from: directory.appendingPathComponent("truth.json"))
+        let truth = normalizeTruth(
+            try readTruth(from: directory.appendingPathComponent("truth.json")),
+            for: session
+        )
         let timeline = try readTimeline(from: directory.appendingPathComponent("timeline.json"))
         return SessionBundle(session: session, windows: windows, events: events, predictions: predictions, truth: truth, timeline: timeline)
     }
@@ -146,6 +152,27 @@ actor FileSessionRepository: SessionRepository {
     private func readTruth(from url: URL) throws -> TruthRecord? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try readJSON(TruthRecord.self, from: url)
+    }
+
+    private func normalizeTruth(_ truth: TruthRecord?, for session: Session) -> TruthRecord? {
+        guard var truth else { return nil }
+        if truth.effectiveResolution != nil {
+            return truth
+        }
+        if truth.hasTruth, truth.healthKitSleepOnset != nil {
+            truth.resolution = .resolvedOnset
+            return truth
+        }
+        guard truth.hasTruth == false else { return truth }
+        switch session.status {
+        case .labeled, .archived:
+            truth.resolution = .noQualifyingSleep
+            truth.healthKitSleepOnset = nil
+            truth.errors = [:]
+            return truth
+        case .created, .recording, .pendingTruth, .interrupted:
+            return nil
+        }
     }
 
     private func readTimeline(from url: URL) throws -> SleepTimeline? {

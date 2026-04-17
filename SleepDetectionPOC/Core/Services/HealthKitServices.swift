@@ -10,6 +10,97 @@ struct SleepSample: Equatable, Sendable {
     var endDate: Date
     var sourceBundle: String?
     var isUserEntered: Bool
+    var state: SleepSampleState = .asleep
+
+    var duration: TimeInterval {
+        endDate.timeIntervalSince(startDate)
+    }
+
+    var isAsleep: Bool {
+        state == .asleep
+    }
+
+    var isAwake: Bool {
+        state == .awake
+    }
+}
+
+enum SleepSampleState: String, Codable, Equatable, Sendable {
+    case asleep
+    case awake
+}
+
+struct CanonicalSleepInterval: Equatable, Sendable {
+    var startDate: Date
+    var endDate: Date
+    var state: SleepSampleState
+    var sourceBundles: [String]
+
+    var duration: TimeInterval {
+        endDate.timeIntervalSince(startDate)
+    }
+
+    var representativeSourceBundle: String? {
+        sourceBundles.first
+    }
+}
+
+enum HealthKitSleepCanonicalizer {
+    static func canonicalize(_ samples: [SleepSample]) -> [CanonicalSleepInterval] {
+        let relevantSamples = samples.filter { sample in
+            !sample.isUserEntered && sample.endDate > sample.startDate
+        }
+        let boundaries = Array(
+            Set(
+                relevantSamples.flatMap { sample in
+                    [sample.startDate, sample.endDate]
+                }
+            )
+        ).sorted()
+
+        guard boundaries.count >= 2 else { return [] }
+
+        var intervals: [CanonicalSleepInterval] = []
+        for index in 0..<(boundaries.count - 1) {
+            let start = boundaries[index]
+            let end = boundaries[index + 1]
+            guard end > start else { continue }
+
+            let coveringSamples = relevantSamples.filter { sample in
+                sample.startDate < end && sample.endDate > start
+            }
+            guard !coveringSamples.isEmpty else { continue }
+
+            let chosenState: SleepSampleState = coveringSamples.contains(where: \.isAwake) ? .awake : .asleep
+            let chosenSources = Array(
+                Set(
+                    coveringSamples
+                        .filter { $0.state == chosenState }
+                        .compactMap(\.sourceBundle)
+                )
+            ).sorted()
+
+            let interval = CanonicalSleepInterval(
+                startDate: start,
+                endDate: end,
+                state: chosenState,
+                sourceBundles: chosenSources
+            )
+
+            if let last = intervals.last,
+               last.state == interval.state,
+               last.endDate == interval.startDate {
+                intervals[intervals.count - 1].endDate = interval.endDate
+                intervals[intervals.count - 1].sourceBundles = Array(
+                    Set(last.sourceBundles).union(interval.sourceBundles)
+                ).sorted()
+            } else {
+                intervals.append(interval)
+            }
+        }
+
+        return intervals
+    }
 }
 
 struct HeartRateSample: Equatable, Sendable {
@@ -27,11 +118,18 @@ enum PriorComputer {
         sleepSamples: [SleepSample],
         heartRateSamples: [HeartRateSample],
         hrvSamples: [HRVSample],
+        sessionSleepAnchors: [SessionSleepAnchor] = [],
+        routeCPrior: RouteCPriorConfig? = nil,
         settings: ExperimentSettings,
         hasHealthKitAccess: Bool,
         calendar: Calendar = .current
     ) -> PriorSnapshot {
-        let sleepCount = sleepSamples.count
+        let rawSleepOnsetAnchors = rawNightlySleepOnsetAnchors(from: sleepSamples, calendar: calendar)
+        let validSessionAnchors = sessionSleepAnchors.sorted { $0.sleepOnset < $1.sleepOnset }
+        let onsetAnchors = validSessionAnchors.count >= 3
+            ? validSessionAnchors.map(\.sleepOnset)
+            : rawSleepOnsetAnchors
+        let sleepCount = onsetAnchors.count
         let heartRateDays = Set(heartRateSamples.map { calendar.startOfDay(for: $0.timestamp) }).count
         let hrvDays = Set(hrvSamples.map { calendar.startOfDay(for: $0.timestamp) }).count
         let level: PriorLevel
@@ -43,15 +141,15 @@ enum PriorComputer {
             level = .P3
         }
 
-        let normalizedSleepMinutes = sleepSamples.map { normalizedBedtimeMinutes(date: $0.startDate, calendar: calendar) }
+        let normalizedSleepMinutes = onsetAnchors.map { normalizedBedtimeMinutes(date: $0, calendar: calendar) }
         let typical = normalizedSleepMinutes.median.map { clockTime(fromNormalizedMinutes: $0) }
 
-        let weekdaySamples = sleepSamples
-            .filter { !calendar.isDateInWeekend($0.startDate) }
-            .map { normalizedBedtimeMinutes(date: $0.startDate, calendar: calendar) }
-        let weekendSamples = sleepSamples
-            .filter { calendar.isDateInWeekend($0.startDate) }
-            .map { normalizedBedtimeMinutes(date: $0.startDate, calendar: calendar) }
+        let weekdaySamples = onsetAnchors
+            .filter { !calendar.isDateInWeekend($0) }
+            .map { normalizedBedtimeMinutes(date: $0, calendar: calendar) }
+        let weekendSamples = onsetAnchors
+            .filter { calendar.isDateInWeekend($0) }
+            .map { normalizedBedtimeMinutes(date: $0, calendar: calendar) }
 
         let baselineHeartRate = heartRateSamples.map(\.bpm).median
         let sleepTarget = baselineHeartRate.map { $0 * 0.85 }
@@ -61,7 +159,8 @@ enum PriorComputer {
         )
         let routeFPriors = computeRouteFPriors(
             level: level,
-            sleepSamples: sleepSamples,
+            onsetAnchors: onsetAnchors,
+            useSessionAnchors: validSessionAnchors.count >= 3,
             heartRateSamples: heartRateSamples,
             hrvSamples: hrvSamples,
             calendar: calendar
@@ -82,7 +181,8 @@ enum PriorComputer {
                 historicalNightLowHRMedian: routeFPriors.nightLowHRMedian,
                 historicalHRVBaseline: routeFPriors.hrvBaseline,
                 routeFProfile: routeFPriors.profile,
-                routeFReadiness: routeFReadiness
+                routeFReadiness: routeFReadiness,
+                routeCPrior: routeCPrior
             ),
             sleepSampleCount: sleepCount,
             heartRateDayCount: heartRateDays,
@@ -97,6 +197,30 @@ enum PriorComputer {
         var nightLowHRMedian: Double?
         var hrvBaseline: Double?
         var profile: RouteFProfile?
+    }
+
+    private static func rawNightlySleepOnsetAnchors(
+        from sleepSamples: [SleepSample],
+        calendar: Calendar
+    ) -> [Date] {
+        let grouped = Dictionary(grouping: HealthKitSleepCanonicalizer.canonicalize(sleepSamples).filter { $0.state == .asleep }) { interval in
+            sleepNightKey(for: interval.startDate, calendar: calendar)
+        }
+        return grouped.values.compactMap { group in
+            group.min { lhs, rhs in
+                lhs.startDate < rhs.startDate
+            }?.startDate
+        }
+        .sorted()
+    }
+
+    private static func sleepNightKey(for date: Date, calendar: Calendar) -> Date {
+        let startOfDay = calendar.startOfDay(for: date)
+        let hour = calendar.component(.hour, from: date)
+        if hour < 12, let previousDay = calendar.date(byAdding: .day, value: -1, to: startOfDay) {
+            return previousDay
+        }
+        return startOfDay
     }
 
     private static func normalizedBedtimeMinutes(date: Date, calendar: Calendar) -> Double {
@@ -125,26 +249,30 @@ enum PriorComputer {
 
     private static func computeRouteFPriors(
         level: PriorLevel,
-        sleepSamples: [SleepSample],
+        onsetAnchors: [Date],
+        useSessionAnchors: Bool,
         heartRateSamples: [HeartRateSample],
         hrvSamples: [HRVSample],
         calendar: Calendar
     ) -> RouteFPriorsComputation {
-        let alignedEveningHR = sleepSamples.flatMap { sleep in
+        let alignedEveningSeries = onsetAnchors.map { onset in
             heartRateSamples
-                .filter { $0.timestamp >= sleep.startDate.addingTimeInterval(-30 * 60) && $0.timestamp <= sleep.startDate }
+                .filter { $0.timestamp >= onset.addingTimeInterval(-30 * 60) && $0.timestamp <= onset }
                 .map(\.bpm)
         }
-        let alignedNightHR = sleepSamples.flatMap { sleep in
+        let alignedNightSeries = onsetAnchors.map { onset in
             heartRateSamples
-                .filter { $0.timestamp >= sleep.startDate.addingTimeInterval(15 * 60) && $0.timestamp <= sleep.startDate.addingTimeInterval(60 * 60) }
+                .filter { $0.timestamp >= onset.addingTimeInterval(15 * 60) && $0.timestamp <= onset.addingTimeInterval(60 * 60) }
                 .map(\.bpm)
         }
-        let alignedNightHRV = sleepSamples.flatMap { sleep in
+        let alignedNightHRVSeries = onsetAnchors.map { onset in
             hrvSamples
-                .filter { $0.timestamp >= sleep.startDate && $0.timestamp <= sleep.startDate.addingTimeInterval(60 * 60) }
+                .filter { $0.timestamp >= onset && $0.timestamp <= onset.addingTimeInterval(60 * 60) }
                 .map(\.sdnn)
         }
+        let alignedEveningHR = alignedEveningSeries.flatMap { $0 }
+        let alignedNightHR = alignedNightSeries.flatMap { $0 }
+        let alignedNightHRV = alignedNightHRVSeries.flatMap { $0 }
 
         let eveningWindowHR = heartRateSamples
             .filter { isTimeOfDay($0.timestamp, betweenStartMinutes: 21 * 60 + 30, endMinutes: 23 * 60 + 30, calendar: calendar) }
@@ -160,10 +288,26 @@ enum PriorComputer {
         let nightLowMedian: Double?
         let hrvBaseline: Double?
 
+        let alignedEveningAvailable = useSessionAnchors
+            ? alignedEveningSeries.filter { !$0.isEmpty }.count >= 3
+            : !alignedEveningHR.isEmpty
+        let alignedNightHRAvailable = useSessionAnchors
+            ? alignedNightSeries.filter { !$0.isEmpty }.count >= 3
+            : !alignedNightHR.isEmpty
+        let alignedHRVAvailable = useSessionAnchors
+            ? alignedNightHRVSeries.filter { !$0.isEmpty }.count >= 3
+            : !alignedNightHRV.isEmpty
+
         if level == .P1 {
-            eveningMedian = alignedEveningHR.median ?? eveningWindowHR.median ?? heartRateSamples.map(\.bpm).median
-            nightLowMedian = alignedNightHR.median ?? lowMedian(from: nightWindowHR) ?? heartRateSamples.map(\.bpm).percentile(0.25)
-            hrvBaseline = alignedNightHRV.median ?? highMedian(from: nightWindowHRV) ?? hrvSamples.map(\.sdnn).median
+            eveningMedian = (alignedEveningAvailable ? alignedEveningHR.median : nil)
+                ?? eveningWindowHR.median
+                ?? heartRateSamples.map(\.bpm).median
+            nightLowMedian = (alignedNightHRAvailable ? alignedNightHR.median : nil)
+                ?? lowMedian(from: nightWindowHR)
+                ?? heartRateSamples.map(\.bpm).percentile(0.25)
+            hrvBaseline = (alignedHRVAvailable ? alignedNightHRV.median : nil)
+                ?? highMedian(from: nightWindowHRV)
+                ?? hrvSamples.map(\.sdnn).median
         } else {
             eveningMedian = eveningWindowHR.median ?? heartRateSamples.map(\.bpm).median
             nightLowMedian = lowMedian(from: nightWindowHR) ?? heartRateSamples.map(\.bpm).percentile(0.25)
@@ -216,18 +360,203 @@ enum PriorComputer {
     }
 }
 
+protocol RouteCMotionPriorProviding: Sendable {
+    func routeCPrior(
+        from bundles: [SessionBundle],
+        baseParameters: RouteCParameters
+    ) -> RouteCPriorConfig?
+}
+
+struct SessionBundleRouteCMotionPriorProvider: RouteCMotionPriorProviding {
+    private struct MotionNightMetrics: Sendable {
+        var continuousStillWindows: Int
+        var minutesFromLastSignificantMovementToOnset: Double
+    }
+
+    var minimumAlignedNightCount = 3
+    var lookbackWindow: TimeInterval = 30 * 60
+
+    func routeCPrior(
+        from bundles: [SessionBundle],
+        baseParameters: RouteCParameters
+    ) -> RouteCPriorConfig? {
+        let metrics = bundles.compactMap { bundle in
+            motionNightMetrics(from: bundle, baseParameters: baseParameters)
+        }
+
+        guard metrics.count >= minimumAlignedNightCount else { return nil }
+
+        let stillMedian = metrics
+            .map { Double($0.continuousStillWindows) }
+            .median ?? Double(baseParameters.stillWindowThreshold)
+        let cooldownMedian = metrics
+            .map(\.minutesFromLastSignificantMovementToOnset)
+            .median ?? baseParameters.significantMovementCooldownMinutes
+
+        let profile: RouteCPriorProfile
+        if stillMedian >= 8 || cooldownMedian >= 6 {
+            profile = .strict
+        } else if stillMedian <= 4, cooldownMedian <= 2 {
+            profile = .relaxed
+        } else {
+            profile = .balanced
+        }
+
+        return RouteCPriorConfig(
+            source: .sessionHistoryMotion,
+            profile: profile,
+            alignedNightCount: metrics.count,
+            stillWindowThreshold: resolvedStillWindowThreshold(for: profile),
+            confirmWindowCount: resolvedConfirmWindowCount(for: profile),
+            significantMovementCooldownMinutes: resolvedCooldownMinutes(for: profile)
+        )
+    }
+
+    private func motionNightMetrics(
+        from bundle: SessionBundle,
+        baseParameters: RouteCParameters
+    ) -> MotionNightMetrics? {
+        guard !bundle.session.interrupted else { return nil }
+        guard let placement = PhonePlacement(rawValue: bundle.session.phonePlacement ?? ""),
+              placement == .bedSurface || placement == .pillow else {
+            return nil
+        }
+        guard let onset = bundle.truth?.healthKitSleepOnset, bundle.truth?.isResolvedOnset == true else {
+            return nil
+        }
+
+        let lookbackStart = onset.addingTimeInterval(-lookbackWindow)
+        let motionWindows = bundle.windows
+            .filter { $0.source == .iphone && $0.motion != nil }
+            .filter { $0.endTime <= onset && $0.endTime >= lookbackStart }
+            .sorted { $0.endTime < $1.endTime }
+
+        guard motionWindows.count >= 3 else { return nil }
+
+        let continuousStillWindows = motionWindows.reversed().prefix { window in
+            guard let motion = window.motion else { return false }
+            return isStill(motion: motion, baseParameters: baseParameters)
+        }.count
+
+        let lastSignificantMovementAt = motionWindows.last(where: { window in
+            guard let motion = window.motion else { return false }
+            return isSignificantMovement(motion: motion, baseParameters: baseParameters)
+        })?.endTime
+
+        let minutesFromLastSignificantMovementToOnset: Double
+        if let lastSignificantMovementAt {
+            minutesFromLastSignificantMovementToOnset = max(
+                onset.timeIntervalSince(lastSignificantMovementAt) / 60,
+                0
+            )
+        } else {
+            minutesFromLastSignificantMovementToOnset = lookbackWindow / 60
+        }
+
+        return MotionNightMetrics(
+            continuousStillWindows: continuousStillWindows,
+            minutesFromLastSignificantMovementToOnset: minutesFromLastSignificantMovementToOnset
+        )
+    }
+
+    private func isStill(
+        motion: MotionFeatures,
+        baseParameters: RouteCParameters
+    ) -> Bool {
+        motion.stillRatio >= 0.9 && motion.accelRMS <= baseParameters.stillnessThreshold
+    }
+
+    private func isSignificantMovement(
+        motion: MotionFeatures,
+        baseParameters: RouteCParameters
+    ) -> Bool {
+        motion.peakCount >= 2 || motion.accelRMS > baseParameters.activeThreshold
+    }
+
+    private func resolvedStillWindowThreshold(for profile: RouteCPriorProfile) -> Int {
+        switch profile {
+        case .strict: 8
+        case .balanced: 6
+        case .relaxed: 5
+        }
+    }
+
+    private func resolvedConfirmWindowCount(for profile: RouteCPriorProfile) -> Int {
+        switch profile {
+        case .strict: 12
+        case .balanced: 10
+        case .relaxed: 8
+        }
+    }
+
+    private func resolvedCooldownMinutes(for profile: RouteCPriorProfile) -> Double {
+        switch profile {
+        case .strict: 6
+        case .balanced: 4
+        case .relaxed: 3
+        }
+    }
+}
+
 enum TruthEvaluator {
+    static let minimumQualifyingSleepDuration: TimeInterval = 15 * 60
+    static let gracePeriod: TimeInterval = 48 * 60 * 60
+
+    enum ResolutionDecision: Equatable, Sendable {
+        case pending
+        case resolvedOnset(SleepSample)
+        case noQualifyingSleep
+    }
+
     static func selectTruth(
         for session: Session,
         from sleepSamples: [SleepSample]
     ) -> SleepSample? {
-        let start = session.startTime.addingTimeInterval(-2 * 3600)
-        let end = session.startTime.addingTimeInterval(12 * 3600)
-        return sleepSamples
-            .filter { !$0.isUserEntered }
-            .filter { $0.startDate >= start && $0.startDate <= end }
-            .sorted { $0.startDate < $1.startDate }
-            .first
+        let relevantSamples = truthRelevantSamples(for: session, from: sleepSamples)
+        let canonicalTimeline = HealthKitSleepCanonicalizer.canonicalize(relevantSamples)
+
+        let candidateInterval: CanonicalSleepInterval?
+        if let alignedAwake = canonicalTimeline.first(where: { interval in
+            interval.state == .awake && interval.endDate > session.startTime
+        }) {
+            candidateInterval = canonicalTimeline.first(where: { interval in
+                interval.state == .asleep &&
+                interval.startDate >= alignedAwake.endDate &&
+                interval.duration >= minimumQualifyingSleepDuration
+            })
+        } else {
+            candidateInterval = canonicalTimeline.first(where: { interval in
+                interval.state == .asleep &&
+                interval.startDate >= session.startTime &&
+                interval.duration >= minimumQualifyingSleepDuration
+            })
+        }
+
+        guard let candidateInterval else { return nil }
+        return SleepSample(
+            startDate: candidateInterval.startDate,
+            endDate: candidateInterval.endDate,
+            sourceBundle: candidateInterval.representativeSourceBundle,
+            isUserEntered: false,
+            state: .asleep
+        )
+    }
+
+    static func resolveTruth(
+        for session: Session,
+        from sleepSamples: [SleepSample],
+        now: Date,
+        gracePeriod: TimeInterval = TruthEvaluator.gracePeriod
+    ) -> ResolutionDecision {
+        if let truthSample = selectTruth(for: session, from: sleepSamples) {
+            return .resolvedOnset(truthSample)
+        }
+
+        let terminalReferenceTime = session.interruptedAt ?? session.endTime ?? session.startTime
+        if now.timeIntervalSince(terminalReferenceTime) >= gracePeriod {
+            return .noQualifyingSleep
+        }
+        return .pending
     }
 
     static func computeErrors(
@@ -251,10 +580,22 @@ enum TruthEvaluator {
             )
         }
     }
+
+    private static func truthRelevantSamples(
+        for session: Session,
+        from sleepSamples: [SleepSample]
+    ) -> [SleepSample] {
+        let start = session.startTime.addingTimeInterval(-2 * 3600)
+        let end = session.startTime.addingTimeInterval(12 * 3600)
+        return sleepSamples.filter { sample in
+            sample.endDate > start && sample.startDate < end
+        }
+    }
 }
 
 protocol TruthRefillService: Sendable {
     func refillPendingTruths() async throws
+    func refreshTruths() async throws
 }
 
 protocol ExportService: Sendable {
@@ -363,15 +704,16 @@ actor LiveHealthKitService {
                 sortDescriptors: [sortDescriptor]
             ) { _, samples, _ in
                 let mapped = (samples as? [HKCategorySample] ?? [])
-                    .filter { sample in
-                        Self.isAsleepValue(sample.value)
-                    }
-                    .map { sample in
-                        SleepSample(
+                    .compactMap { sample -> SleepSample? in
+                        guard let state = Self.sleepSampleState(for: sample.value) else {
+                            return nil
+                        }
+                        return SleepSample(
                             startDate: sample.startDate,
                             endDate: sample.endDate,
                             sourceBundle: sample.sourceRevision.source.bundleIdentifier,
-                            isUserEntered: (sample.metadata?[HKMetadataKeyWasUserEntered] as? Bool) ?? false
+                            isUserEntered: (sample.metadata?[HKMetadataKeyWasUserEntered] as? Bool) ?? false,
+                            state: state
                         )
                     }
                 continuation.resume(returning: mapped)
@@ -489,44 +831,102 @@ actor LiveHealthKitService {
         value == HKCategoryValueSleepAnalysis.asleepDeep.rawValue ||
         value == HKCategoryValueSleepAnalysis.asleepREM.rawValue
     }
+
+    private static func sleepSampleState(for value: Int) -> SleepSampleState? {
+        if isAsleepValue(value) {
+            return .asleep
+        }
+        if value == HKCategoryValueSleepAnalysis.awake.rawValue {
+            return .awake
+        }
+        return nil
+    }
     #endif
 }
 
+protocol SleepHistoryProvider: Sendable {
+    func fetchRecentSleepSamples(days: Int) async -> [SleepSample]
+}
+
+extension LiveHealthKitService: SleepHistoryProvider {}
+
 actor LiveTruthRefillService: TruthRefillService {
-    private let healthKitService: LiveHealthKitService
+    private let sleepHistoryProvider: any SleepHistoryProvider
     private let repository: SessionRepository
 
     init(healthKitService: LiveHealthKitService, repository: SessionRepository) {
-        self.healthKitService = healthKitService
+        self.sleepHistoryProvider = healthKitService
+        self.repository = repository
+    }
+
+    init(sleepHistoryProvider: any SleepHistoryProvider, repository: SessionRepository) {
+        self.sleepHistoryProvider = sleepHistoryProvider
         self.repository = repository
     }
 
     func refillPendingTruths() async throws {
+        try await refillTruths(reprocessResolvedNoQualifying: false)
+    }
+
+    func refreshTruths() async throws {
+        try await refillTruths(reprocessResolvedNoQualifying: true)
+    }
+
+    private func refillTruths(reprocessResolvedNoQualifying: Bool) async throws {
         let bundles = try await repository.loadBundles()
-        let samples = await healthKitService.fetchRecentSleepSamples(days: 3)
+        let samples = await sleepHistoryProvider.fetchRecentSleepSamples(days: 3)
         let now = Date()
 
-        for bundle in bundles where bundle.session.status == .pendingTruth || bundle.session.status == .interrupted {
-            guard let truthSample = TruthEvaluator.selectTruth(for: bundle.session, from: samples) else {
+        for bundle in bundles where shouldProcessTruth(for: bundle, reprocessResolvedNoQualifying: reprocessResolvedNoQualifying) {
+            switch TruthEvaluator.resolveTruth(for: bundle.session, from: samples, now: now) {
+            case .pending:
+                if bundle.session.status == .interrupted {
+                    var updatedSession = bundle.session
+                    updatedSession.status = .pendingTruth
+                    try await repository.updateSession(updatedSession)
+                }
                 continue
-            }
-
-            let truth = TruthRecord(
-                hasTruth: true,
-                healthKitSleepOnset: truthSample.startDate,
-                healthKitSource: truthSample.sourceBundle,
-                retrievedAt: now,
-                errors: TruthEvaluator.computeErrors(
-                    truthDate: truthSample.startDate,
-                    predictions: bundle.referencePredictions
+            case .resolvedOnset(let truthSample):
+                let truth = TruthRecord(
+                    resolution: .resolvedOnset,
+                    healthKitSleepOnset: truthSample.startDate,
+                    healthKitSource: truthSample.sourceBundle,
+                    retrievedAt: now,
+                    errors: TruthEvaluator.computeErrors(
+                        truthDate: truthSample.startDate,
+                        predictions: bundle.referencePredictions
+                    )
                 )
-            )
 
-            var updatedSession = bundle.session
-            updatedSession.status = .labeled
-            try await repository.updateSession(updatedSession)
-            try await repository.saveTruth(truth, for: updatedSession.sessionId)
+                var updatedSession = bundle.session
+                updatedSession.status = .labeled
+                try await repository.updateSession(updatedSession)
+                try await repository.saveTruth(truth, for: updatedSession.sessionId)
+            case .noQualifyingSleep:
+                let truth = TruthRecord(
+                    resolution: .noQualifyingSleep,
+                    healthKitSleepOnset: nil,
+                    healthKitSource: nil,
+                    retrievedAt: now,
+                    errors: [:]
+                )
+
+                var updatedSession = bundle.session
+                updatedSession.status = .labeled
+                try await repository.updateSession(updatedSession)
+                try await repository.saveTruth(truth, for: updatedSession.sessionId)
+            }
         }
+    }
+
+    private func shouldProcessTruth(
+        for bundle: SessionBundle,
+        reprocessResolvedNoQualifying: Bool
+    ) -> Bool {
+        if bundle.session.status == .pendingTruth || bundle.session.status == .interrupted {
+            return true
+        }
+        return reprocessResolvedNoQualifying && bundle.truth?.isNoQualifyingSleep == true
     }
 }
 
@@ -547,7 +947,7 @@ actor LiveExportService: ExportService {
             "routeD_prediction", "routeD_error_min",
             "routeE_prediction", "routeE_error_min",
             "routeF_prediction", "routeF_error_min",
-            "healthkit_sleep_onset", "sample_quality"
+            "healthkit_truth_resolution", "healthkit_sleep_onset", "sample_quality"
         ].joined(separator: ",")
 
         let rows = bundles.map { bundle in
@@ -565,6 +965,7 @@ actor LiveExportService: ExportService {
             let dError = truth?.errors["D"]?.errorMinutes.description ?? ""
             let eError = truth?.errors["E"]?.errorMinutes.description ?? ""
             let fError = truth?.errors["F"]?.errorMinutes.description ?? ""
+            let truthResolution = bundle.truthResolutionLabel
             let truthTime = truth?.healthKitSleepOnset?.csvTimestamp ?? ""
             return [
                 bundle.session.date,
@@ -583,6 +984,7 @@ actor LiveExportService: ExportService {
                 eError,
                 fPrediction,
                 fError,
+                truthResolution,
                 truthTime,
                 bundle.sampleQuality.rawValue
             ].joined(separator: ",")

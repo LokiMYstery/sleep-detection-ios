@@ -77,6 +77,11 @@ enum TruthDirection: String, Codable, Sendable {
     case exact
 }
 
+enum TruthResolution: String, Codable, Equatable, Sendable {
+    case resolvedOnset
+    case noQualifyingSleep
+}
+
 enum RouteFReadiness: String, Codable, CaseIterable, Sendable {
     case full
     case hrOnly
@@ -87,6 +92,16 @@ enum RouteFProfile: String, Codable, CaseIterable, Sendable {
     case strong
     case moderate
     case weak
+}
+
+enum RouteCPriorSource: String, Codable, CaseIterable, Sendable {
+    case sessionHistoryMotion
+}
+
+enum RouteCPriorProfile: String, Codable, CaseIterable, Sendable {
+    case strict
+    case balanced
+    case relaxed
 }
 
 struct DeviceCondition: Codable, Equatable, Sendable {
@@ -1580,6 +1595,64 @@ struct TruthRecord: Codable, Equatable, Sendable {
     var healthKitSource: String?
     var retrievedAt: Date
     var errors: [String: RouteErrorRecord]
+    var resolution: TruthResolution?
+
+    init(
+        hasTruth: Bool,
+        healthKitSleepOnset: Date?,
+        healthKitSource: String?,
+        retrievedAt: Date,
+        errors: [String: RouteErrorRecord],
+        resolution: TruthResolution? = nil
+    ) {
+        self.hasTruth = hasTruth
+        self.healthKitSleepOnset = healthKitSleepOnset
+        self.healthKitSource = healthKitSource
+        self.retrievedAt = retrievedAt
+        self.errors = errors
+        if let resolution {
+            self.resolution = resolution
+        } else if hasTruth, healthKitSleepOnset != nil {
+            self.resolution = .resolvedOnset
+        } else {
+            self.resolution = nil
+        }
+    }
+
+    init(
+        resolution: TruthResolution,
+        healthKitSleepOnset: Date?,
+        healthKitSource: String?,
+        retrievedAt: Date,
+        errors: [String: RouteErrorRecord]
+    ) {
+        self.init(
+            hasTruth: resolution == .resolvedOnset,
+            healthKitSleepOnset: healthKitSleepOnset,
+            healthKitSource: healthKitSource,
+            retrievedAt: retrievedAt,
+            errors: errors,
+            resolution: resolution
+        )
+    }
+
+    var effectiveResolution: TruthResolution? {
+        if let resolution {
+            return resolution
+        }
+        if hasTruth, healthKitSleepOnset != nil {
+            return .resolvedOnset
+        }
+        return nil
+    }
+
+    var isResolvedOnset: Bool {
+        effectiveResolution == .resolvedOnset && healthKitSleepOnset != nil
+    }
+
+    var isNoQualifyingSleep: Bool {
+        effectiveResolution == .noQualifyingSleep
+    }
 }
 
 struct Session: Codable, Identifiable, Equatable, Sendable {
@@ -1630,6 +1703,15 @@ struct Session: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+struct RouteCPriorConfig: Codable, Equatable, Sendable {
+    var source: RouteCPriorSource
+    var profile: RouteCPriorProfile
+    var alignedNightCount: Int
+    var stillWindowThreshold: Int
+    var confirmWindowCount: Int
+    var significantMovementCooldownMinutes: Double
+}
+
 struct RoutePriors: Codable, Equatable, Sendable {
     var priorLevel: PriorLevel
     var typicalSleepOnset: ClockTime?
@@ -1644,6 +1726,7 @@ struct RoutePriors: Codable, Equatable, Sendable {
     var historicalHRVBaseline: Double? = nil
     var routeFProfile: RouteFProfile? = nil
     var routeFReadiness: RouteFReadiness = .insufficient
+    var routeCPrior: RouteCPriorConfig? = nil
 }
 
 struct PriorSnapshot: Codable, Equatable, Sendable {
@@ -1673,6 +1756,13 @@ struct PriorSnapshot: Codable, Equatable, Sendable {
         hasHealthKitAccess: false,
         routeFReadiness: .insufficient
     )
+}
+
+struct SessionSleepAnchor: Codable, Equatable, Sendable {
+    var sessionId: UUID
+    var sessionStartTime: Date
+    var sleepOnset: Date
+    var interrupted: Bool
 }
 
 struct WatchWindowPayload: Codable, Equatable, Sendable {
@@ -1716,7 +1806,7 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
         if session.status == .archived && truth == nil {
             return .Q4
         }
-        if let truth, truth.hasTruth {
+        if let truth, truth.isResolvedOnset {
             if session.interrupted {
                 return .Q2
             }
@@ -1734,7 +1824,9 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
         if session.interrupted {
             tags.append("sessionInterrupted")
         }
-        if truth?.hasTruth != true {
+        if truth?.isNoQualifyingSleep == true {
+            tags.append("truthNoQualifyingSleep")
+        } else if truth == nil, session.status == .pendingTruth || session.status == .interrupted {
             tags.append("truthPending")
         }
         if phonePlacementLabel == "Not set" {
@@ -1750,6 +1842,36 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
             }
         }
         return tags
+    }
+
+    var truthResolution: TruthResolution? {
+        truth?.effectiveResolution
+    }
+
+    var truthResolutionLabel: String {
+        truthResolution?.rawValue ?? "pending"
+    }
+
+    var truthDisplayValue: String {
+        if let truth, truth.isResolvedOnset, let onset = truth.healthKitSleepOnset {
+            return onset.formatted(date: .abbreviated, time: .shortened)
+        }
+        if truth?.isNoQualifyingSleep == true {
+            return "No qualifying sleep after session start"
+        }
+        return "Pending HealthKit truth"
+    }
+
+    var sessionSleepAnchor: SessionSleepAnchor? {
+        guard let truth, truth.isResolvedOnset, let sleepOnset = truth.healthKitSleepOnset else {
+            return nil
+        }
+        return SessionSleepAnchor(
+            sessionId: session.sessionId,
+            sessionStartTime: session.startTime,
+            sleepOnset: sleepOnset,
+            interrupted: session.interrupted
+        )
     }
 
     var comparisonRouteIds: [RouteId] {
@@ -1787,7 +1909,7 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
 
     var referenceTruth: TruthRecord? {
         guard var truth else { return nil }
-        guard let truthDate = truth.healthKitSleepOnset else { return truth }
+        guard truth.isResolvedOnset, let truthDate = truth.healthKitSleepOnset else { return truth }
         truth.errors = Self.computeErrors(
             truthDate: truthDate,
             predictions: referencePredictions

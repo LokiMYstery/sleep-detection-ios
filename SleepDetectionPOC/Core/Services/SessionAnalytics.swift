@@ -31,11 +31,18 @@ struct ErrorTrendPoint: Codable, Identifiable, Equatable, Sendable {
     var absErrorMinutes: Double
 }
 
+struct TruthResolutionInventory: Codable, Equatable, Sendable {
+    var pending: Int
+    var resolvedOnset: Int
+    var noQualifyingSleep: Int
+}
+
 struct EvaluationExportPayload: Codable, Equatable, Sendable {
     var generatedAt: Date
     var overall: [RouteEvaluationSummary]
     var stratified: [EvaluationDimensionExport]
     var errorTrend: [ErrorTrendPoint]
+    var truthResolutionInventory: TruthResolutionInventory
 }
 
 struct EvaluationDimensionExport: Codable, Equatable, Sendable {
@@ -111,12 +118,28 @@ enum SessionAnalytics {
                     buckets: stratifiedSummaries(from: bundles, dimension: dimension)
                 )
             },
-            errorTrend: errorTrendPoints(from: bundles)
+            errorTrend: errorTrendPoints(from: bundles),
+            truthResolutionInventory: truthResolutionInventory(from: bundles)
         )
     }
 
+    static func truthResolutionInventory(from bundles: [SessionBundle]) -> TruthResolutionInventory {
+        bundles.reduce(
+            into: TruthResolutionInventory(pending: 0, resolvedOnset: 0, noQualifyingSleep: 0)
+        ) { partialResult, bundle in
+            switch bundle.truthResolution {
+            case .resolvedOnset:
+                partialResult.resolvedOnset += 1
+            case .noQualifyingSleep:
+                partialResult.noQualifyingSleep += 1
+            case nil:
+                partialResult.pending += 1
+            }
+        }
+    }
+
     private static func summarize(routeId: RouteId, bundles: [SessionBundle]) -> RouteEvaluationSummary {
-        let labeledBundles = bundles.filter { $0.truth?.hasTruth == true }
+        let labeledBundles = bundles.filter { $0.truth?.isResolvedOnset == true }
         let total = labeledBundles.count
 
         guard total > 0 else {

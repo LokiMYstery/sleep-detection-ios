@@ -36,6 +36,7 @@ final class AppModel: ObservableObject {
     private let healthKitService: LiveHealthKitService
     private let truthRefillService: TruthRefillService
     private let exportService: ExportService
+    private let routeCMotionPriorProvider: any RouteCMotionPriorProviding
     private let motionProvider: LiveMotionProvider
     private let interactionProvider: LiveInteractionProvider
     private let audioProvider: AudioProvider
@@ -88,6 +89,7 @@ final class AppModel: ObservableObject {
         repository: SessionRepository = FileSessionRepository(),
         settingsStore: SettingsStore = UserDefaultsSettingsStore(),
         healthKitService: LiveHealthKitService = LiveHealthKitService(),
+        routeCMotionPriorProvider: any RouteCMotionPriorProviding = SessionBundleRouteCMotionPriorProvider(),
         motionProvider: LiveMotionProvider = LiveMotionProvider(),
         interactionProvider: LiveInteractionProvider = LiveInteractionProvider(),
         audioProvider: AudioProvider = LiveAudioProvider(),
@@ -100,6 +102,7 @@ final class AppModel: ObservableObject {
         self.healthKitService = healthKitService
         self.truthRefillService = LiveTruthRefillService(healthKitService: healthKitService, repository: repository)
         self.exportService = LiveExportService(repository: repository)
+        self.routeCMotionPriorProvider = routeCMotionPriorProvider
         self.motionProvider = motionProvider
         self.interactionProvider = interactionProvider
         self.audioProvider = audioProvider
@@ -114,23 +117,6 @@ final class AppModel: ObservableObject {
         settings = await settingsStore.load()
         watchSetupCompleted = await settingsStore.loadWatchSetupCompleted()
         deviceCondition = await healthKitService.detectDeviceCondition()
-
-        let sleepSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
-            ? []
-            : await healthKitService.fetchRecentSleepSamples()
-        let heartRateSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
-            ? []
-            : await healthKitService.fetchRecentHeartRateSamples()
-        let hrvSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
-            ? []
-            : await healthKitService.fetchRecentHRVSamples()
-        priorSnapshot = PriorComputer.compute(
-            sleepSamples: sleepSamples,
-            heartRateSamples: heartRateSamples,
-            hrvSamples: hrvSamples,
-            settings: settings,
-            hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
-        )
         updateAudioRuntimeState(recordEvents: false)
         updateWatchRuntimeState(recordEvents: false)
         drainWatchDiagnostics(recordEvents: false)
@@ -138,6 +124,7 @@ final class AppModel: ObservableObject {
         _ = try? await repository.recoverInterruptedSessions(now: Date())
         try? await truthRefillService.refillPendingTruths()
         await reloadBundles()
+        await recomputePriorSnapshot()
     }
 
     var watchSetupState: WatchSetupState {
@@ -543,8 +530,9 @@ final class AppModel: ObservableObject {
     }
 
     func refreshTruths() async {
-        try? await truthRefillService.refillPendingTruths()
+        try? await truthRefillService.refreshTruths()
         await reloadBundles()
+        await recomputePriorSnapshot()
     }
 
     func updateCurrentSessionPhonePlacement(_ placement: PhonePlacement) async {
@@ -565,38 +553,18 @@ final class AppModel: ObservableObject {
     func saveSettings() async {
         await settingsStore.save(settings)
         deviceCondition = await healthKitService.detectDeviceCondition()
-        let sleepSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
-            ? []
-            : await healthKitService.fetchRecentSleepSamples()
-        let heartRateSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
-            ? []
-            : await healthKitService.fetchRecentHeartRateSamples()
-        let hrvSamples = (settings.disableHealthKitPriors || !deviceCondition.hasHealthKitAccess)
-            ? []
-            : await healthKitService.fetchRecentHRVSamples()
-        priorSnapshot = PriorComputer.compute(
-            sleepSamples: sleepSamples,
-            heartRateSamples: heartRateSamples,
-            hrvSamples: hrvSamples,
-            settings: settings,
-            hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
-        )
+        await recomputePriorSnapshot()
     }
 
     func requestHealthKitAccess() async {
         guard !settings.disableHealthKitPriors else { return }
         let granted = await healthKitService.requestAuthorization()
         deviceCondition = await healthKitService.detectDeviceCondition()
-        let sleepSamples = granted ? await healthKitService.fetchRecentSleepSamples() : []
-        let heartRateSamples = granted ? await healthKitService.fetchRecentHeartRateSamples() : []
-        let hrvSamples = granted ? await healthKitService.fetchRecentHRVSamples() : []
-        priorSnapshot = PriorComputer.compute(
-            sleepSamples: sleepSamples,
-            heartRateSamples: heartRateSamples,
-            hrvSamples: hrvSamples,
-            settings: settings,
-            hasHealthKitAccess: deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
-        )
+        if granted {
+            await recomputePriorSnapshot()
+        } else {
+            priorSnapshot = .empty
+        }
         if !granted {
             await reportError(
                 title: "HealthKit Access Not Granted",
@@ -711,7 +679,7 @@ final class AppModel: ObservableObject {
 
         if let truthDate = bundle.truth?.healthKitSleepOnset {
             let updatedTruth = TruthRecord(
-                hasTruth: bundle.truth?.hasTruth ?? true,
+                resolution: bundle.truth?.effectiveResolution ?? .resolvedOnset,
                 healthKitSleepOnset: truthDate,
                 healthKitSource: bundle.truth?.healthKitSource,
                 retrievedAt: bundle.truth?.retrievedAt ?? Date(),
@@ -734,6 +702,29 @@ final class AppModel: ObservableObject {
 
     private func reloadBundles() async {
         sessionBundles = (try? await repository.loadBundles()) ?? []
+    }
+
+    private func recomputePriorSnapshot() async {
+        let healthKitEnabled = deviceCondition.hasHealthKitAccess && !settings.disableHealthKitPriors
+        let sleepSamples = healthKitEnabled ? await healthKitService.fetchRecentSleepSamples() : []
+        let heartRateSamples = healthKitEnabled ? await healthKitService.fetchRecentHeartRateSamples() : []
+        let hrvSamples = healthKitEnabled ? await healthKitService.fetchRecentHRVSamples() : []
+        let sessionSleepAnchors = sessionBundles.compactMap(\.sessionSleepAnchor)
+        let routeCPrior = healthKitEnabled
+            ? routeCMotionPriorProvider.routeCPrior(
+                from: sessionBundles,
+                baseParameters: settings.routeCParameters
+            )
+            : nil
+        priorSnapshot = PriorComputer.compute(
+            sleepSamples: sleepSamples,
+            heartRateSamples: heartRateSamples,
+            hrvSamples: hrvSamples,
+            sessionSleepAnchors: sessionSleepAnchors,
+            routeCPrior: routeCPrior,
+            settings: settings,
+            hasHealthKitAccess: healthKitEnabled
+        )
     }
 
     private func isWatchReadyForRealtime(_ snapshot: WatchRuntimeSnapshot) -> Bool {

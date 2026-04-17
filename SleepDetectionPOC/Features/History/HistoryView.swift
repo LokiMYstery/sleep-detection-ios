@@ -133,11 +133,7 @@ struct HistoryView: View {
         if !bundle.session.notes.isEmpty {
             LabeledContent("Notes", value: bundle.session.notes)
         }
-        if let truth = bundle.truth, let onset = truth.healthKitSleepOnset {
-            LabeledContent("Truth", value: onset.formattedDateTime)
-        } else {
-            LabeledContent("Truth", value: "Pending / unavailable")
-        }
+        LabeledContent("Truth", value: bundle.truthDisplayValue)
 
         if !bundle.anomalyTags.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
