@@ -518,7 +518,7 @@ actor LiveTruthRefillService: TruthRefillService {
                 retrievedAt: now,
                 errors: TruthEvaluator.computeErrors(
                     truthDate: truthSample.startDate,
-                    predictions: bundle.predictions
+                    predictions: bundle.referencePredictions
                 )
             )
 
@@ -551,8 +551,8 @@ actor LiveExportService: ExportService {
         ].joined(separator: ",")
 
         let rows = bundles.map { bundle in
-            let predictions = bundle.predictions.byRoute
-            let truth = bundle.truth
+            let predictions = bundle.referencePredictions.byRoute
+            let truth = bundle.referenceTruth
             let aPrediction = predictions[.A]?.predictedSleepOnset?.csvTimestamp ?? ""
             let bPrediction = predictions[.B]?.predictedSleepOnset?.csvTimestamp ?? ""
             let cPrediction = predictions[.C]?.predictedSleepOnset?.csvTimestamp ?? ""

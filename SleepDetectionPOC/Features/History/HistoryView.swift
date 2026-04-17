@@ -164,8 +164,8 @@ struct HistoryView: View {
             ForEach(bundle.comparisonRouteIds, id: \.self) { routeId in
                 RouteComparisonRow(
                     routeId: routeId,
-                    prediction: bundle.predictions.byRoute[routeId],
-                    error: bundle.truth?.errors[routeId.rawValue]
+                    prediction: bundle.referencePredictions.byRoute[routeId],
+                    error: bundle.referenceTruth?.errors[routeId.rawValue]
                 )
             }
         }

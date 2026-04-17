@@ -91,7 +91,7 @@ enum SessionAnalytics {
             .sorted { $0.session.startTime < $1.session.startTime }
             .flatMap { bundle -> [ErrorTrendPoint] in
                 trackedRouteIds.compactMap { routeId in
-                    guard let error = bundle.truth?.errors[routeId.rawValue] else { return nil }
+                    guard let error = bundle.referenceTruth?.errors[routeId.rawValue] else { return nil }
                     return ErrorTrendPoint(
                         routeId: routeId,
                         sessionDate: bundle.session.startTime,
@@ -137,9 +137,9 @@ enum SessionAnalytics {
         }
 
         let evaluatedErrors: [RouteErrorRecord] = labeledBundles.compactMap { bundle in
-            guard let prediction = bundle.predictions.byRoute[routeId] else { return nil }
+            guard let prediction = bundle.referencePredictions.byRoute[routeId] else { return nil }
             guard prediction.isAvailable, prediction.predictedSleepOnset != nil else { return nil }
-            return bundle.truth?.errors[routeId.rawValue]
+            return bundle.referenceTruth?.errors[routeId.rawValue]
         }
 
         let evaluatedCount = evaluatedErrors.count

@@ -289,7 +289,7 @@ struct SleepDetectionPOCTests {
                 windows: [],
                 events: [],
                 predictions: [
-                    RoutePrediction(routeId: .A, predictedSleepOnset: start, confidence: .confirmed, evidenceSummary: "", lastUpdated: start, isAvailable: true)
+                    RoutePrediction(routeId: .A, predictedSleepOnset: start.addingTimeInterval(240), confidence: .confirmed, evidenceSummary: "", lastUpdated: start, isAvailable: true)
                 ],
                 truth: TruthRecord(
                     hasTruth: true,
@@ -401,6 +401,194 @@ struct SleepDetectionPOCTests {
         ]
         let selected = TruthEvaluator.selectTruth(for: session, from: samples)
         #expect(selected?.sourceBundle == "B")
+    }
+
+    @Test("Session bundle prefers latched timeline predictions for export and error computation")
+    func sessionBundlePrefersLatchedTimelinePredictions() throws {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let truthOnset = start.addingTimeInterval(600)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: true, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let timeline = SleepTimeline(
+            primaryEpisodeIndex: nil,
+            primaryActionReadyAt: nil,
+            primaryOnsetEstimate: nil,
+            actionTakenAt: nil,
+            actionStatus: .notTriggered,
+            latestNightState: .monitoring,
+            episodes: [
+                SleepEpisode(
+                    episodeIndex: 0,
+                    kind: .primary,
+                    candidateAt: truthOnset.addingTimeInterval(90),
+                    actionReadyAt: truthOnset.addingTimeInterval(120),
+                    onsetEstimate: truthOnset,
+                    wakeDetectedAt: truthOnset.addingTimeInterval(1_800),
+                    endedAt: truthOnset.addingTimeInterval(1_800),
+                    state: .ended,
+                    actionEligibility: .ineligible,
+                    routeEvidence: [
+                        RouteEpisodeEvidence(
+                            routeId: .A,
+                            candidateAt: truthOnset.addingTimeInterval(90),
+                            actionReadyAt: nil,
+                            onsetEstimate: truthOnset,
+                            confidence: .confirmed,
+                            confirmType: nil,
+                            evidenceSummary: "Route A latched",
+                            isBackfilled: true,
+                            supportsImmediateAction: false,
+                            isLatched: true
+                        ),
+                        RouteEpisodeEvidence(
+                            routeId: .D,
+                            candidateAt: truthOnset.addingTimeInterval(90),
+                            actionReadyAt: truthOnset.addingTimeInterval(120),
+                            onsetEstimate: truthOnset.addingTimeInterval(30),
+                            confidence: .confirmed,
+                            confirmType: nil,
+                            evidenceSummary: "Route D latched",
+                            isBackfilled: true,
+                            supportsImmediateAction: false,
+                            isLatched: true
+                        )
+                    ]
+                )
+            ],
+            actionDecisions: [],
+            lastUpdated: truthOnset.addingTimeInterval(1_800)
+        )
+        let bundle = SessionBundle(
+            session: session,
+            windows: [],
+            events: [],
+            predictions: [
+                RoutePrediction(
+                    routeId: .A,
+                    predictedSleepOnset: truthOnset.addingTimeInterval(7_200),
+                    confidence: .candidate,
+                    evidenceSummary: "Baseline fallback",
+                    lastUpdated: truthOnset.addingTimeInterval(1_800),
+                    isAvailable: true
+                ),
+                RoutePrediction(
+                    routeId: .D,
+                    predictedSleepOnset: nil,
+                    confidence: .none,
+                    evidenceSummary: "Monitoring motion, audio, and interaction after audio_missing",
+                    lastUpdated: truthOnset.addingTimeInterval(1_800),
+                    isAvailable: true
+                )
+            ],
+            truth: TruthRecord(
+                hasTruth: true,
+                healthKitSleepOnset: truthOnset,
+                healthKitSource: "unit-test",
+                retrievedAt: truthOnset.addingTimeInterval(3_600),
+                errors: [:]
+            ),
+            timeline: timeline
+        )
+
+        let reference = bundle.referencePredictions.byRoute
+        #expect(reference[.A]?.predictedSleepOnset == truthOnset)
+        #expect(reference[.A]?.confidence == .confirmed)
+        #expect(reference[.D]?.predictedSleepOnset == truthOnset.addingTimeInterval(30))
+        #expect(reference[.D]?.confidence == .confirmed)
+
+        let referenceTruth = try #require(bundle.referenceTruth)
+        #expect(referenceTruth.errors["A"]?.errorMinutes == 0)
+        #expect(referenceTruth.errors["D"]?.errorMinutes == 0.5)
+        #expect(referenceTruth.errors["D"]?.direction == .late)
+
+        let export = SessionExportPayload(bundle: bundle)
+        #expect(export.truth?.errors["D"]?.errorMinutes == 0.5)
+        #expect(export.latchedPredictions.byRoute[.D]?.predictedSleepOnset == truthOnset.addingTimeInterval(30))
+        #expect(export.diagnostics.latchedRouteStatuses.contains {
+            $0.routeId == .D && $0.predictedSleepOnset == truthOnset.addingTimeInterval(30)
+        })
+    }
+
+    @Test("Session analytics count timeline-backed Route D predictions even after current state resets")
+    func sessionAnalyticsUseReferencePredictions() {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let truthOnset = start.addingTimeInterval(600)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: true, hasMotionAccess: true),
+            priorLevel: .P2,
+            enabledRoutes: RouteId.allCases
+        )
+        let bundle = SessionBundle(
+            session: session,
+            windows: [],
+            events: [],
+            predictions: [
+                RoutePrediction(
+                    routeId: .D,
+                    predictedSleepOnset: nil,
+                    confidence: .none,
+                    evidenceSummary: "Monitoring motion, audio, and interaction after interaction_active",
+                    lastUpdated: truthOnset.addingTimeInterval(1_800),
+                    isAvailable: true
+                )
+            ],
+            truth: TruthRecord(
+                hasTruth: true,
+                healthKitSleepOnset: truthOnset,
+                healthKitSource: "unit-test",
+                retrievedAt: truthOnset.addingTimeInterval(3_600),
+                errors: [:]
+            ),
+            timeline: SleepTimeline(
+                primaryEpisodeIndex: nil,
+                primaryActionReadyAt: nil,
+                primaryOnsetEstimate: nil,
+                actionTakenAt: nil,
+                actionStatus: .notTriggered,
+                latestNightState: .monitoring,
+                episodes: [
+                    SleepEpisode(
+                        episodeIndex: 0,
+                        kind: .primary,
+                        candidateAt: truthOnset.addingTimeInterval(60),
+                        actionReadyAt: truthOnset.addingTimeInterval(120),
+                        onsetEstimate: truthOnset.addingTimeInterval(-120),
+                        wakeDetectedAt: truthOnset.addingTimeInterval(1_800),
+                        endedAt: truthOnset.addingTimeInterval(1_800),
+                        state: .ended,
+                        actionEligibility: .ineligible,
+                        routeEvidence: [
+                            RouteEpisodeEvidence(
+                                routeId: .D,
+                                candidateAt: truthOnset.addingTimeInterval(60),
+                                actionReadyAt: truthOnset.addingTimeInterval(120),
+                                onsetEstimate: truthOnset.addingTimeInterval(-120),
+                                confidence: .confirmed,
+                                confirmType: nil,
+                                evidenceSummary: "Latched Route D episode",
+                                isBackfilled: true,
+                                supportsImmediateAction: false,
+                                isLatched: true
+                            )
+                        ]
+                    )
+                ],
+                actionDecisions: [],
+                lastUpdated: truthOnset.addingTimeInterval(1_800)
+            )
+        )
+
+        let summary = try! #require(SessionAnalytics.overallRouteSummaries(from: [bundle]).first { $0.routeId == .D })
+        #expect(summary.labeledSessionCount == 1)
+        #expect(summary.evaluatedCount == 1)
+        #expect(summary.noResultRate == 0)
+        #expect(summary.meanAbsError == 2)
+        #expect(summary.earlyRate == 1)
     }
 
     @Test("Route C keeps onset separate from confirmedAt and does not reset on steady unlocked state")

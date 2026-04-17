@@ -123,9 +123,13 @@ struct AudioFeatures: Codable, Equatable, Sendable {
     var disturbanceScore: Double
     var playbackLeakageScore: Double
     var snoreCandidateCount: Int
+    var snoreCandidateCountRaw: Int?
     var snoreSeconds: Double
+    var snoreSecondsRaw: Double?
     var snoreConfidenceMax: Double
+    var snoreConfidenceMaxRaw: Double?
     var snoreLowBandRatio: Double
+    var snoreSuppressionReason: String?
 
     init(
         envNoiseLevel: Double,
@@ -144,9 +148,13 @@ struct AudioFeatures: Codable, Equatable, Sendable {
         disturbanceScore: Double = 0,
         playbackLeakageScore: Double = 0,
         snoreCandidateCount: Int = 0,
+        snoreCandidateCountRaw: Int? = nil,
         snoreSeconds: Double = 0,
+        snoreSecondsRaw: Double? = nil,
         snoreConfidenceMax: Double = 0,
-        snoreLowBandRatio: Double = 0
+        snoreConfidenceMaxRaw: Double? = nil,
+        snoreLowBandRatio: Double = 0,
+        snoreSuppressionReason: String? = nil
     ) {
         self.envNoiseLevel = envNoiseLevel
         self.envNoiseVariance = envNoiseVariance
@@ -164,9 +172,13 @@ struct AudioFeatures: Codable, Equatable, Sendable {
         self.disturbanceScore = disturbanceScore
         self.playbackLeakageScore = playbackLeakageScore
         self.snoreCandidateCount = snoreCandidateCount
+        self.snoreCandidateCountRaw = snoreCandidateCountRaw
         self.snoreSeconds = snoreSeconds
+        self.snoreSecondsRaw = snoreSecondsRaw
         self.snoreConfidenceMax = snoreConfidenceMax
+        self.snoreConfidenceMaxRaw = snoreConfidenceMaxRaw
         self.snoreLowBandRatio = snoreLowBandRatio
+        self.snoreSuppressionReason = snoreSuppressionReason
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -186,9 +198,13 @@ struct AudioFeatures: Codable, Equatable, Sendable {
         case disturbanceScore
         case playbackLeakageScore
         case snoreCandidateCount
+        case snoreCandidateCountRaw
         case snoreSeconds
+        case snoreSecondsRaw
         case snoreConfidenceMax
+        case snoreConfidenceMaxRaw
         case snoreLowBandRatio
+        case snoreSuppressionReason
     }
 
     init(from decoder: Decoder) throws {
@@ -210,9 +226,13 @@ struct AudioFeatures: Codable, Equatable, Sendable {
             disturbanceScore: try container.decodeIfPresent(Double.self, forKey: .disturbanceScore) ?? 0,
             playbackLeakageScore: try container.decodeIfPresent(Double.self, forKey: .playbackLeakageScore) ?? 0,
             snoreCandidateCount: try container.decodeIfPresent(Int.self, forKey: .snoreCandidateCount) ?? 0,
+            snoreCandidateCountRaw: try container.decodeIfPresent(Int.self, forKey: .snoreCandidateCountRaw),
             snoreSeconds: try container.decodeIfPresent(Double.self, forKey: .snoreSeconds) ?? 0,
+            snoreSecondsRaw: try container.decodeIfPresent(Double.self, forKey: .snoreSecondsRaw),
             snoreConfidenceMax: try container.decodeIfPresent(Double.self, forKey: .snoreConfidenceMax) ?? 0,
-            snoreLowBandRatio: try container.decodeIfPresent(Double.self, forKey: .snoreLowBandRatio) ?? 0
+            snoreConfidenceMaxRaw: try container.decodeIfPresent(Double.self, forKey: .snoreConfidenceMaxRaw),
+            snoreLowBandRatio: try container.decodeIfPresent(Double.self, forKey: .snoreLowBandRatio) ?? 0,
+            snoreSuppressionReason: try container.decodeIfPresent(String.self, forKey: .snoreSuppressionReason)
         )
     }
 }
@@ -1739,6 +1759,159 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
     var diagnostics: SessionDiagnosticsSummary {
         SessionDiagnosticsSummary(bundle: self)
     }
+
+    var latchedPredictions: [RoutePrediction] {
+        guard let timeline else { return [] }
+
+        return RouteId.allCases.compactMap { routeId in
+            guard let match = Self.preferredTimelineEvidence(for: routeId, in: timeline) else { return nil }
+            return Self.routePrediction(
+                from: match.evidence,
+                in: match.episode,
+                fallbackUpdatedAt: timeline.lastUpdated
+            )
+        }
+    }
+
+    var referencePredictions: [RoutePrediction] {
+        let currentByRoute = predictions.byRoute
+        let latchedByRoute = latchedPredictions.byRoute
+
+        return RouteId.allCases.compactMap { routeId in
+            Self.preferredReferencePrediction(
+                current: currentByRoute[routeId],
+                latched: latchedByRoute[routeId]
+            )
+        }
+    }
+
+    var referenceTruth: TruthRecord? {
+        guard var truth else { return nil }
+        guard let truthDate = truth.healthKitSleepOnset else { return truth }
+        truth.errors = Self.computeErrors(
+            truthDate: truthDate,
+            predictions: referencePredictions
+        )
+        return truth
+    }
+
+    private static func preferredTimelineEvidence(
+        for routeId: RouteId,
+        in timeline: SleepTimeline
+    ) -> (episode: SleepEpisode, evidence: RouteEpisodeEvidence)? {
+        let matches = timeline.episodes.compactMap { episode -> (SleepEpisode, RouteEpisodeEvidence)? in
+            guard let evidence = episode.routeEvidence.first(where: { $0.routeId == routeId }) else {
+                return nil
+            }
+            return (episode, evidence)
+        }
+
+        return matches.first {
+            $0.1.confidence == .confirmed || $0.1.isLatched
+        } ?? matches.first {
+            $0.1.confidence == .suspected
+        } ?? matches.first
+    }
+
+    private static func routePrediction(
+        from evidence: RouteEpisodeEvidence,
+        in episode: SleepEpisode,
+        fallbackUpdatedAt: Date
+    ) -> RoutePrediction {
+        let lastUpdated = episode.endedAt
+            ?? episode.wakeDetectedAt
+            ?? episode.actionReadyAt
+            ?? evidence.actionReadyAt
+            ?? evidence.candidateAt
+            ?? fallbackUpdatedAt
+
+        return RoutePrediction(
+            routeId: evidence.routeId,
+            predictedSleepOnset: evidence.onsetEstimate,
+            candidateAt: evidence.candidateAt,
+            confirmedAt: evidence.actionReadyAt,
+            actionReadyAt: evidence.actionReadyAt,
+            confidence: evidence.confidence,
+            evidenceSummary: evidence.evidenceSummary,
+            lastUpdated: lastUpdated,
+            isAvailable: true,
+            supportsImmediateAction: evidence.supportsImmediateAction,
+            isLatched: evidence.isLatched || evidence.confidence == .confirmed
+        )
+    }
+
+    private static func preferredReferencePrediction(
+        current: RoutePrediction?,
+        latched: RoutePrediction?
+    ) -> RoutePrediction? {
+        switch (current, latched) {
+        case let (.some(current), .some(latched)):
+            return shouldPrefer(latched, over: current) ? latched : current
+        case let (.some(current), .none):
+            return current
+        case let (.none, .some(latched)):
+            return latched
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private static func shouldPrefer(_ latched: RoutePrediction, over current: RoutePrediction) -> Bool {
+        if current.predictedSleepOnset == nil {
+            return true
+        }
+
+        let currentRank = confidenceRank(current.confidence)
+        let latchedRank = confidenceRank(latched.confidence)
+        if latchedRank != currentRank {
+            return latchedRank > currentRank
+        }
+
+        if latched.isLatched != current.isLatched {
+            return latched.isLatched
+        }
+
+        if latched.confirmedAt != nil, current.confirmedAt == nil {
+            return true
+        }
+
+        return false
+    }
+
+    private static func confidenceRank(_ confidence: SleepConfidence) -> Int {
+        switch confidence {
+        case .none:
+            return 0
+        case .candidate:
+            return 1
+        case .suspected:
+            return 2
+        case .confirmed:
+            return 3
+        }
+    }
+
+    private static func computeErrors(
+        truthDate: Date,
+        predictions: [RoutePrediction]
+    ) -> [String: RouteErrorRecord] {
+        predictions.reduce(into: [:]) { partialResult, prediction in
+            guard let predicted = prediction.predictedSleepOnset else { return }
+            let deltaMinutes = predicted.timeIntervalSince(truthDate) / 60
+            let direction: TruthDirection
+            if deltaMinutes == 0 {
+                direction = .exact
+            } else if deltaMinutes < 0 {
+                direction = .early
+            } else {
+                direction = .late
+            }
+            partialResult[prediction.routeId.rawValue] = RouteErrorRecord(
+                errorMinutes: abs(deltaMinutes),
+                direction: direction
+            )
+        }
+    }
 }
 
 extension Array where Element == RoutePrediction {
@@ -1754,6 +1927,7 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
     var windows: [FeatureWindow]
     var events: [RouteEvent]
     var predictions: [RoutePrediction]
+    var latchedPredictions: [RoutePrediction]
     var truth: TruthRecord?
     var timeline: SleepTimeline?
     var diagnostics: SessionDiagnosticsSummary
@@ -1763,7 +1937,8 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
         self.windows = bundle.windows
         self.events = bundle.events
         self.predictions = bundle.predictions
-        self.truth = bundle.truth
+        self.latchedPredictions = bundle.latchedPredictions
+        self.truth = bundle.referenceTruth
         self.timeline = bundle.timeline
         self.diagnostics = bundle.diagnostics
     }
@@ -1808,6 +1983,7 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
     var windowSummary: WindowSummary
     var predictionSnapshots: [PredictionSnapshot]
     var routeStatuses: [RouteStatus]
+    var latchedRouteStatuses: [RouteStatus]
     var audioRuntime: AudioRuntimeSnapshot?
     var watchRuntime: WatchRuntimeSnapshot?
     var alerts: [String]
@@ -1861,6 +2037,18 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
                 isAvailable: prediction.isAvailable,
                 predictedSleepOnset: prediction.predictedSleepOnset,
                 confirmedAt: prediction.confirmedAt,
+                lastUpdated: prediction.lastUpdated,
+                evidenceSummary: prediction.evidenceSummary
+            )
+        }
+        self.latchedRouteStatuses = RouteId.allCases.compactMap { routeId in
+            guard let prediction = bundle.latchedPredictions.byRoute[routeId] else { return nil }
+            return RouteStatus(
+                routeId: routeId,
+                confidence: prediction.confidence,
+                isAvailable: prediction.isAvailable,
+                predictedSleepOnset: prediction.predictedSleepOnset,
+                confirmedAt: prediction.confirmedAt ?? prediction.actionReadyAt,
                 lastUpdated: prediction.lastUpdated,
                 evidenceSummary: prediction.evidenceSummary
             )
