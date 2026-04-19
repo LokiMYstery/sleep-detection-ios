@@ -5,20 +5,76 @@ struct MonitorView: View {
 
     var body: some View {
         List {
-            Section("Route Status") {
-                ForEach(model.activePredictions) { prediction in
-                    VStack(alignment: .leading, spacing: 4) {
+            Section("Unified Status") {
+                if let decision = model.activeUnifiedDecision {
+                    VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text(prediction.routeId.displayName)
+                            Text(decision.statusLabel)
+                                .font(.headline)
                             Spacer()
-                            Text(prediction.confidence.rawValue.capitalized)
-                                .foregroundStyle(prediction.confidence == .confirmed ? .green : .secondary)
+                            Text(decision.capabilityProfile.id)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        Text(prediction.predictedSleepOnset?.formattedDateTime ?? "Pending")
-                            .font(.subheadline)
-                        Text(prediction.evidenceSummary)
+                        Text("Episode \(decision.episodeStartAt?.formattedDateTime ?? "pending")")
+                            .font(.caption)
+                        Text("Candidate \(decision.candidateAt?.formattedDateTime ?? "pending") · Confirm \(decision.confirmedAt?.formattedDateTime ?? "pending")")
+                            .font(.caption)
+                        Text("Progress \(decision.progressScore, specifier: "%.2f") / \(decision.confirmThreshold, specifier: "%.2f")")
+                            .font(.caption)
+                        Text(decision.evidenceSummary)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let denialSummary = decision.denialSummary, !denialSummary.isEmpty {
+                            Text("Deny \(denialSummary)")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                } else {
+                    Text("Unified decision is idle.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let latestSnapshot = model.activeUnifiedDiagnostics?.evidenceSnapshots.last {
+                Section("Unified Channels") {
+                    ForEach(latestSnapshot.channelSnapshots) { snapshot in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(snapshot.channel.displayName)
+                                Spacer()
+                                Text(snapshot.isStrongDeny ? "Strong Deny" : (snapshot.isAvailable ? "Available" : "Waiting"))
+                                    .font(.caption)
+                                    .foregroundStyle(snapshot.isStrongDeny ? .orange : .secondary)
+                            }
+                            Text(snapshot.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("positive \(snapshot.positiveScore, specifier: "%.2f")")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if !model.activePredictions.isEmpty {
+                Section("Lane Diagnostics") {
+                    ForEach(model.activePredictions) { prediction in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(prediction.routeId.displayName)
+                                Spacer()
+                                Text(prediction.confidence.rawValue.capitalized)
+                                    .foregroundStyle(prediction.confidence == .confirmed ? .green : .secondary)
+                            }
+                            Text(prediction.predictedSleepOnset?.formattedDateTime ?? "Pending")
+                                .font(.subheadline)
+                            Text(prediction.evidenceSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

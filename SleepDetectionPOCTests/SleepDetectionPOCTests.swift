@@ -1026,6 +1026,206 @@ struct SleepDetectionPOCTests {
         #expect(summary.earlyRate == 1)
     }
 
+    @Test("Unified session analytics ignores legacy labeled sessions without unified decisions")
+    func unifiedSessionAnalyticsIgnoresLegacySessions() {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let truthOnset = start.addingTimeInterval(600)
+        let legacySession = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let unifiedSession = Session.make(
+            startTime: start.addingTimeInterval(86_400),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+
+        let summary = UnifiedSessionAnalytics.overallSummary(
+            from: [
+                SessionBundle(
+                    session: legacySession,
+                    windows: [],
+                    events: [],
+                    predictions: [],
+                    truth: TruthRecord(
+                        hasTruth: true,
+                        healthKitSleepOnset: truthOnset,
+                        healthKitSource: "legacy",
+                        retrievedAt: truthOnset,
+                        errors: [:]
+                    ),
+                    timeline: nil,
+                    unifiedArtifacts: nil
+                ),
+                SessionBundle(
+                    session: unifiedSession,
+                    windows: [],
+                    events: [],
+                    predictions: [],
+                    truth: TruthRecord(
+                        hasTruth: true,
+                        healthKitSleepOnset: truthOnset,
+                        healthKitSource: "unit-test",
+                        retrievedAt: truthOnset,
+                        errors: [:]
+                    ),
+                    timeline: nil,
+                    unifiedArtifacts: UnifiedSessionArtifacts(
+                        decision: UnifiedSleepDecision(
+                            state: .confirmed,
+                            capabilityProfile: UnifiedCapabilityProfile(channels: [.phoneMotion, .phoneInteraction]),
+                            episodeStartAt: truthOnset.addingTimeInterval(-120),
+                            candidateAt: truthOnset.addingTimeInterval(-60),
+                            confirmedAt: truthOnset.addingTimeInterval(120),
+                            progressScore: 3.1,
+                            candidateThreshold: 1.5,
+                            confirmThreshold: 3.0,
+                            evidenceSummary: "Unified confirmation reached using Phone Motion, Phone Interaction",
+                            denialSummary: nil,
+                            isFinal: true,
+                            lastUpdated: truthOnset.addingTimeInterval(120)
+                        ),
+                        timeline: nil,
+                        diagnostics: nil
+                    )
+                )
+            ]
+        )
+        let stratified = UnifiedSessionAnalytics.stratifiedSummaries(
+            from: [
+                SessionBundle(
+                    session: legacySession,
+                    windows: [],
+                    events: [],
+                    predictions: [],
+                    truth: TruthRecord(
+                        hasTruth: true,
+                        healthKitSleepOnset: truthOnset,
+                        healthKitSource: "legacy",
+                        retrievedAt: truthOnset,
+                        errors: [:]
+                    ),
+                    timeline: nil,
+                    unifiedArtifacts: nil
+                ),
+                SessionBundle(
+                    session: unifiedSession,
+                    windows: [],
+                    events: [],
+                    predictions: [],
+                    truth: TruthRecord(
+                        hasTruth: true,
+                        healthKitSleepOnset: truthOnset,
+                        healthKitSource: "unit-test",
+                        retrievedAt: truthOnset,
+                        errors: [:]
+                    ),
+                    timeline: nil,
+                    unifiedArtifacts: UnifiedSessionArtifacts(
+                        decision: UnifiedSleepDecision(
+                            state: .confirmed,
+                            capabilityProfile: UnifiedCapabilityProfile(channels: [.phoneMotion, .phoneInteraction]),
+                            episodeStartAt: truthOnset.addingTimeInterval(-120),
+                            candidateAt: truthOnset.addingTimeInterval(-60),
+                            confirmedAt: truthOnset.addingTimeInterval(120),
+                            progressScore: 3.1,
+                            candidateThreshold: 1.5,
+                            confirmThreshold: 3.0,
+                            evidenceSummary: "Unified confirmation reached using Phone Motion, Phone Interaction",
+                            denialSummary: nil,
+                            isFinal: true,
+                            lastUpdated: truthOnset.addingTimeInterval(120)
+                        ),
+                        timeline: nil,
+                        diagnostics: nil
+                    )
+                )
+            ],
+            dimension: .priorLevel
+        )
+
+        #expect(summary.labeledSessionCount == 1)
+        #expect(summary.evaluatedCount == 1)
+        #expect(summary.meanAbsError == 2)
+        #expect(summary.noResultRate == 0)
+        #expect(stratified.count == 1)
+        #expect(stratified.first?.sessionCount == 1)
+    }
+
+    @Test("Unified decision engine clears rollback denial after evaluation resumes")
+    @MainActor
+    func unifiedDecisionEngineClearsRollbackDenialAfterResume() throws {
+        let bus = EventBus()
+        let engine = UnifiedDecisionEngine(settings: .default, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = unifiedTestSession(start: start)
+
+        engine.start(session: session, priors: PriorSnapshot.empty.routePriors, learningProfile: .empty)
+        engine.onWindow(
+            unifiedTestPhoneWindow(
+                index: 0,
+                start: start,
+                motion: unifiedStillMotion(),
+                interaction: unifiedQuietInteraction(lastInteractionAt: start.addingTimeInterval(-180))
+            )
+        )
+        engine.onWindow(
+            unifiedTestPhoneWindow(
+                index: 1,
+                start: start.addingTimeInterval(30),
+                motion: unifiedStillMotion(),
+                interaction: unifiedActiveInteraction(at: start.addingTimeInterval(60))
+            )
+        )
+
+        let rolledBackDecision = try #require(engine.currentDecision())
+        #expect(rolledBackDecision.denialSummary == "phoneInteractionActive")
+        #expect(bus.recentEvents.contains { $0.eventType == "unified.candidateRolledBack" })
+
+        engine.onWindow(
+            unifiedTestPhoneWindow(
+                index: 2,
+                start: start.addingTimeInterval(60),
+                motion: unifiedStillMotion(),
+                interaction: unifiedQuietInteraction(lastInteractionAt: start.addingTimeInterval(-120))
+            )
+        )
+
+        let resumedDecision = try #require(engine.currentDecision())
+        #expect(resumedDecision.state == .monitoring)
+        #expect(resumedDecision.denialSummary == nil)
+        #expect(resumedDecision.episodeStartAt == start.addingTimeInterval(90))
+    }
+
+    @Test("Unified decision engine skips rollback before any episode exists")
+    @MainActor
+    func unifiedDecisionEngineSkipsRollbackBeforeEpisodeExists() throws {
+        let bus = EventBus()
+        let engine = UnifiedDecisionEngine(settings: .default, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = unifiedTestSession(start: start)
+
+        engine.start(session: session, priors: PriorSnapshot.empty.routePriors, learningProfile: .empty)
+        engine.onWindow(
+            unifiedTestPhoneWindow(
+                index: 0,
+                start: start,
+                motion: unifiedStillMotion(),
+                interaction: unifiedActiveInteraction(at: start.addingTimeInterval(30))
+            )
+        )
+
+        let decision = try #require(engine.currentDecision())
+        #expect(decision.state == .monitoring)
+        #expect(decision.episodeStartAt == nil)
+        #expect(decision.candidateAt == nil)
+        #expect(decision.denialSummary == nil)
+        #expect(bus.recentEvents.contains { $0.eventType == "unified.candidateRolledBack" } == false)
+    }
+
     @Test("Route C keeps onset separate from confirmedAt and does not reset on steady unlocked state")
     @MainActor
     func routeCKeepsOnsetSeparateFromConfirmedAt() async throws {
@@ -4621,6 +4821,69 @@ private func routeCHistoricalMotions(profile: RouteCPriorProfile) -> [MotionFeat
             routeCTestMovementMotion(rms: 0.09, peakCount: 2)
         ]
     }
+}
+
+private func unifiedTestSession(start: Date) -> Session {
+    Session.make(
+        startTime: start,
+        deviceCondition: DeviceCondition(
+            hasWatch: false,
+            watchReachable: false,
+            hasHealthKitAccess: false,
+            hasMicrophoneAccess: false,
+            hasMotionAccess: true
+        ),
+        priorLevel: .P1,
+        enabledRoutes: RouteId.allCases
+    )
+}
+
+private func unifiedTestPhoneWindow(
+    index: Int,
+    start: Date,
+    motion: MotionFeatures,
+    interaction: InteractionFeatures
+) -> FeatureWindow {
+    FeatureWindow(
+        windowId: index,
+        startTime: start,
+        endTime: start.addingTimeInterval(30),
+        duration: 30,
+        source: .iphone,
+        motion: motion,
+        audio: nil,
+        interaction: interaction,
+        watch: nil
+    )
+}
+
+private func unifiedStillMotion() -> MotionFeatures {
+    MotionFeatures(
+        accelRMS: 0.005,
+        peakCount: 0,
+        attitudeChangeRate: 0,
+        maxAccel: 0.01,
+        stillRatio: 1,
+        stillDuration: 30
+    )
+}
+
+private func unifiedQuietInteraction(lastInteractionAt: Date) -> InteractionFeatures {
+    InteractionFeatures(
+        isLocked: true,
+        timeSinceLastInteraction: 180,
+        screenWakeCount: 0,
+        lastInteractionAt: lastInteractionAt
+    )
+}
+
+private func unifiedActiveInteraction(at timestamp: Date) -> InteractionFeatures {
+    InteractionFeatures(
+        isLocked: false,
+        timeSinceLastInteraction: 0,
+        screenWakeCount: 1,
+        lastInteractionAt: timestamp
+    )
 }
 
 private final class RecordingWatchProvider: WatchProvider, @unchecked Sendable {

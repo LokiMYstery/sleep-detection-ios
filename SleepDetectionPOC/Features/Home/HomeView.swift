@@ -172,16 +172,71 @@ struct HomeView: View {
                 }
             }
 
-            Section("Latest Predictions") {
-                ForEach(model.activePredictions) { prediction in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(prediction.routeId.displayName)
-                            .font(.headline)
-                        Text(prediction.predictedSleepOnset?.formattedDateTime ?? "No prediction yet")
-                            .font(.subheadline)
-                        Text(prediction.evidenceSummary)
+            Section("Unified Decision") {
+                if let decision = model.activeUnifiedDecision {
+                    LabeledContent("State", value: decision.statusLabel)
+                    LabeledContent("Profile", value: decision.capabilityProfile.displayName)
+                    LabeledContent("Episode Start", value: decision.episodeStartAt?.formattedDateTime ?? "Pending")
+                    LabeledContent("Candidate", value: decision.candidateAt?.formattedDateTime ?? "Pending")
+                    LabeledContent("Confirmed", value: decision.confirmedAt?.formattedDateTime ?? "Pending")
+                    LabeledContent(
+                        "Progress",
+                        value: String(
+                            format: "%.2f / %.2f",
+                            decision.progressScore,
+                            decision.confirmThreshold
+                        )
+                    )
+                    Text(decision.evidenceSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let denialSummary = decision.denialSummary, !denialSummary.isEmpty {
+                        Text("Deny: \(denialSummary)")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.orange)
+                    }
+                } else {
+                    Text("Unified decision is idle.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let latestUnifiedSnapshot = model.activeUnifiedDiagnostics?.evidenceSnapshots.last,
+               !latestUnifiedSnapshot.channelSnapshots.isEmpty {
+                Section("Unified Channels") {
+                    ForEach(latestUnifiedSnapshot.channelSnapshots) { snapshot in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(snapshot.channel.displayName)
+                                    .font(.headline)
+                                Spacer()
+                                Text(snapshot.isStrongDeny ? "Strong Deny" : (snapshot.isAvailable ? "Active" : "Waiting"))
+                                    .font(.caption)
+                                    .foregroundStyle(snapshot.isStrongDeny ? .orange : .secondary)
+                            }
+                            Text(snapshot.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(String(format: "Positive score %.2f", snapshot.positiveScore))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if !model.activePredictions.isEmpty {
+                Section("Lane Diagnostics") {
+                    ForEach(model.activePredictions) { prediction in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(prediction.routeId.displayName)
+                                .font(.headline)
+                            Text(prediction.predictedSleepOnset?.formattedDateTime ?? "No prediction yet")
+                                .font(.subheadline)
+                            Text(prediction.evidenceSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

@@ -4,76 +4,73 @@ import SwiftUI
 struct HistoryView: View {
     @EnvironmentObject private var model: AppModel
 
-    private var overallSummaries: [RouteEvaluationSummary] {
-        guard !model.sessionBundles.isEmpty else { return [] }
-        return SessionAnalytics.overallRouteSummaries(from: model.sessionBundles)
+    private var overallSummary: UnifiedEvaluationSummary? {
+        guard !model.sessionBundles.isEmpty else { return nil }
+        return UnifiedSessionAnalytics.overallSummary(from: model.sessionBundles)
     }
 
-    private var errorTrendPoints: [ErrorTrendPoint] {
-        SessionAnalytics.errorTrendPoints(from: model.sessionBundles)
+    private var errorTrendPoints: [UnifiedErrorTrendPoint] {
+        UnifiedSessionAnalytics.errorTrendPoints(from: model.sessionBundles)
     }
 
-    private var priorLevelBuckets: [StratifiedRouteSummary] {
-        SessionAnalytics.stratifiedSummaries(from: model.sessionBundles, dimension: .priorLevel)
+    private var priorLevelBuckets: [StratifiedUnifiedSummary] {
+        UnifiedSessionAnalytics.stratifiedSummaries(from: model.sessionBundles, dimension: .priorLevel)
     }
 
-    private var weekpartBuckets: [StratifiedRouteSummary] {
-        SessionAnalytics.stratifiedSummaries(from: model.sessionBundles, dimension: .weekpart)
+    private var weekpartBuckets: [StratifiedUnifiedSummary] {
+        UnifiedSessionAnalytics.stratifiedSummaries(from: model.sessionBundles, dimension: .weekpart)
     }
 
-    private var placementBuckets: [StratifiedRouteSummary] {
-        SessionAnalytics.stratifiedSummaries(from: model.sessionBundles, dimension: .phonePlacement)
+    private var placementBuckets: [StratifiedUnifiedSummary] {
+        UnifiedSessionAnalytics.stratifiedSummaries(from: model.sessionBundles, dimension: .phonePlacement)
+    }
+
+    private var capabilityProfiles: [UnifiedCapabilityProfileSummary] {
+        UnifiedSessionAnalytics.capabilityProfileSummaries(from: model.sessionBundles)
     }
 
     var body: some View {
         List {
-            if !overallSummaries.isEmpty {
-                Section("Evaluation Summary") {
-                    ForEach(overallSummaries) { summary in
-                        RouteSummaryCard(summary: summary)
-                    }
+            if let overallSummary, overallSummary.labeledSessionCount > 0 {
+                Section("Unified Evaluation Summary") {
+                    UnifiedSummaryCard(summary: overallSummary)
                 }
 
                 if !errorTrendPoints.isEmpty {
-                    Section("Error Trend") {
+                    Section("Confirm-Time Error Trend") {
                         Chart(errorTrendPoints) { point in
                             LineMark(
                                 x: .value("Session", point.sessionDate),
                                 y: .value("Abs Error", point.absErrorMinutes)
                             )
-                            .foregroundStyle(by: .value("Route", point.routeId.displayName))
-
                             PointMark(
                                 x: .value("Session", point.sessionDate),
                                 y: .value("Abs Error", point.absErrorMinutes)
                             )
-                            .foregroundStyle(by: .value("Route", point.routeId.displayName))
                         }
                         .frame(height: 220)
-                    }
-
-                    Section("Hit10 Rate") {
-                        Chart(overallSummaries) { summary in
-                            BarMark(
-                                x: .value("Route", summary.routeId.displayName),
-                                y: .value("Hit10", summary.hit10 * 100)
-                            )
-                            .foregroundStyle(by: .value("Route", summary.routeId.displayName))
-                        }
-                        .frame(height: 180)
                     }
                 }
 
                 stratifiedSection(title: "By Prior Level", buckets: priorLevelBuckets)
                 stratifiedSection(title: "By Weekpart", buckets: weekpartBuckets)
                 stratifiedSection(title: "By Placement", buckets: placementBuckets)
+
+                if !capabilityProfiles.isEmpty {
+                    Section("By Capability Profile") {
+                        ForEach(capabilityProfiles) { summary in
+                            UnifiedCapabilityProfileRow(summary: summary)
+                        }
+                    }
+                }
             }
 
             Section("Sessions") {
                 ForEach(model.sessionBundles) { bundle in
                     VStack(alignment: .leading, spacing: 10) {
                         sessionSummary(bundle)
-                        routeComparison(bundle)
+                        unifiedDecisionSummary(bundle)
+                        laneDiagnostics(bundle)
                         replayActions(bundle)
                     }
                     .padding(.vertical, 4)
@@ -101,17 +98,14 @@ struct HistoryView: View {
     }
 
     @ViewBuilder
-    private func stratifiedSection(title: String, buckets: [StratifiedRouteSummary]) -> some View {
+    private func stratifiedSection(title: String, buckets: [StratifiedUnifiedSummary]) -> some View {
         if !buckets.isEmpty {
             Section(title) {
                 ForEach(buckets) { bucket in
                     VStack(alignment: .leading, spacing: 8) {
                         Text("\(bucket.bucketLabel) · \(bucket.sessionCount) sessions")
                             .font(.headline)
-
-                        ForEach(bucket.routeSummaries) { summary in
-                            CompactRouteSummaryRow(summary: summary)
-                        }
+                        UnifiedCompactSummaryRow(summary: bucket.summary)
                     }
                     .padding(.vertical, 4)
                 }
@@ -152,17 +146,73 @@ struct HistoryView: View {
     }
 
     @ViewBuilder
-    private func routeComparison(_ bundle: SessionBundle) -> some View {
+    private func unifiedDecisionSummary(_ bundle: SessionBundle) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Route Comparison")
+            Text("Unified Outcome")
                 .font(.headline)
 
-            ForEach(bundle.comparisonRouteIds, id: \.self) { routeId in
-                RouteComparisonRow(
-                    routeId: routeId,
-                    prediction: bundle.referencePredictions.byRoute[routeId],
-                    error: bundle.referenceTruth?.errors[routeId.rawValue]
-                )
+            if let decision = bundle.unifiedDecision {
+                LabeledContent("State", value: decision.statusLabel)
+                LabeledContent("Profile", value: decision.capabilityProfile.displayName)
+                LabeledContent("Episode Start", value: decision.episodeStartAt?.formattedDateTime ?? "Pending")
+                LabeledContent("Candidate", value: decision.candidateAt?.formattedDateTime ?? "Pending")
+                LabeledContent("Confirmed", value: decision.confirmedAt?.formattedDateTime ?? "Pending")
+                if let error = bundle.referenceTruth?.errors["unified"] {
+                    LabeledContent(
+                        "Confirm Error",
+                        value: String(format: "%.1f min (%@)", error.errorMinutes, error.direction.rawValue)
+                    )
+                }
+                Text(decision.evidenceSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let denialSummary = decision.denialSummary, !denialSummary.isEmpty {
+                    Text("Deny: \(denialSummary)")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if let channels = bundle.unifiedDiagnostics?.evidenceSnapshots.last?.channelSnapshots,
+                   !channels.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(channels) { snapshot in
+                            HStack(alignment: .top) {
+                                Text(snapshot.channel.displayName)
+                                    .font(.caption.weight(.semibold))
+                                Spacer()
+                                Text(snapshot.isStrongDeny ? "Strong Deny" : String(format: "%.2f", snapshot.positiveScore))
+                                    .font(.caption2)
+                                    .foregroundStyle(snapshot.isStrongDeny ? .orange : .secondary)
+                            }
+                            Text(snapshot.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            } else {
+                Text("No unified artifacts were recorded for this session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func laneDiagnostics(_ bundle: SessionBundle) -> some View {
+        if !bundle.referencePredictions.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Lane Diagnostics")
+                    .font(.headline)
+
+                ForEach(bundle.comparisonRouteIds, id: \.self) { routeId in
+                    RouteComparisonRow(
+                        routeId: routeId,
+                        prediction: bundle.referencePredictions.byRoute[routeId],
+                        error: bundle.referenceTruth?.errors[routeId.rawValue]
+                    )
+                }
             }
         }
     }
@@ -183,13 +233,13 @@ struct HistoryView: View {
     }
 }
 
-private struct RouteSummaryCard: View {
-    let summary: RouteEvaluationSummary
+private struct UnifiedSummaryCard: View {
+    let summary: UnifiedEvaluationSummary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(summary.routeId.displayName)
+                Text("Unified Confirm")
                     .font(.headline)
                 Spacer()
                 Text("\(summary.evaluatedCount)/\(summary.labeledSessionCount) evaluated")
@@ -231,12 +281,12 @@ private struct RouteSummaryCard: View {
     }
 }
 
-private struct CompactRouteSummaryRow: View {
-    let summary: RouteEvaluationSummary
+private struct UnifiedCompactSummaryRow: View {
+    let summary: UnifiedEvaluationSummary
 
     var body: some View {
         HStack {
-            Text(summary.routeId.displayName)
+            Text("Unified")
                 .font(.subheadline.weight(.medium))
             Spacer()
             Text("Hit10 \(summary.hit10.percentString)")
@@ -248,6 +298,34 @@ private struct CompactRouteSummaryRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct UnifiedCapabilityProfileRow: View {
+    let summary: UnifiedCapabilityProfileSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(summary.displayName)
+                    .font(.headline)
+                Spacer()
+                Text("\(summary.sessionCount) sessions")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("Confirm \(summary.confirmRate.percentString)")
+                    .font(.caption)
+                Text("Median \(summary.medianAbsError.minuteMetricString)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Mean \(summary.meanAbsError.minuteMetricString)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 

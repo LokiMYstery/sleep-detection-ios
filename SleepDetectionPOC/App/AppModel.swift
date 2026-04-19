@@ -8,6 +8,9 @@ final class AppModel: ObservableObject {
     @Published var sessionBundles: [SessionBundle] = []
     @Published var activePredictions: [RoutePrediction] = []
     @Published var activeTimeline: SleepTimeline?
+    @Published var activeUnifiedDecision: UnifiedSleepDecision?
+    @Published var activeUnifiedTimeline: UnifiedSleepTimeline?
+    @Published var activeUnifiedDiagnostics: UnifiedDecisionDiagnostics?
     @Published var recentWindows: [FeatureWindow] = []
     @Published var settings: ExperimentSettings = .default
     @Published var priorSnapshot: PriorSnapshot = .empty
@@ -45,6 +48,7 @@ final class AppModel: ObservableObject {
     private let watchAutoStopDelaySeconds: TimeInterval
 
     private var routeRunner: RouteRunner?
+    private var unifiedDecisionEngine: UnifiedDecisionEngine?
     private var recordingTask: Task<Void, Never>?
     private var audioMonitoringTask: Task<Void, Never>?
     private var watchPollingTask: Task<Void, Never>?
@@ -352,6 +356,7 @@ final class AppModel: ObservableObject {
                 ]
             ))
         } else if !initialWatchSnapshot.isWatchAppInstalled {
+            disabledFeatures.append("watchCompanionMissing")
             startupWarnings.append("Watch companion app is not installed. Route E will wait until the watch app is installed and prepared.")
             eventBus.post(RouteEvent(
                 routeId: .A,
@@ -403,6 +408,14 @@ final class AppModel: ObservableObject {
         if let activeTimeline {
             try? await repository.saveTimeline(activeTimeline, for: session.sessionId)
         }
+
+        let learningProfile = UnifiedLearningComputer.compute(from: sessionBundles)
+        let unifiedEngine = UnifiedDecisionEngine(settings: settings, eventBus: eventBus)
+        unifiedDecisionEngine = unifiedEngine
+        unifiedEngine.start(session: session, priors: priorSnapshot.routePriors, learningProfile: learningProfile)
+        syncActiveUnifiedState()
+        await persistUnifiedArtifacts(for: session.sessionId)
+        postUnifiedDecisionSnapshot()
 
         eventSubscriptionID = eventBus.subscribe { [weak self] event in
             guard let self, let sessionId = self.currentSession?.sessionId else { return }
@@ -503,6 +516,8 @@ final class AppModel: ObservableObject {
         routeRunner = nil
 
         session.endTime = Date()
+        unifiedDecisionEngine?.finalize(at: session.endTime ?? Date())
+        syncActiveUnifiedState()
         session.status = .pendingTruth
         session.notes = session.interrupted ? "Recovered interrupted session" : session.notes
 
@@ -511,6 +526,7 @@ final class AppModel: ObservableObject {
         if let activeTimeline {
             try? await repository.saveTimeline(activeTimeline, for: session.sessionId)
         }
+        await persistUnifiedArtifacts(for: session.sessionId)
         try? await truthRefillService.refillPendingTruths()
 
         if let eventSubscriptionID {
@@ -520,7 +536,11 @@ final class AppModel: ObservableObject {
 
         currentSession = nil
         activeTimeline = nil
+        activeUnifiedDecision = nil
+        activeUnifiedTimeline = nil
+        activeUnifiedDiagnostics = nil
         timelineTracker.reset()
+        unifiedDecisionEngine = nil
         resetWatchStartupTracking()
         updateAudioRuntimeState(recordEvents: false)
         updateWatchRuntimeState(recordEvents: false)
@@ -685,7 +705,8 @@ final class AppModel: ObservableObject {
                 retrievedAt: bundle.truth?.retrievedAt ?? Date(),
                 errors: TruthEvaluator.computeErrors(
                     truthDate: truthDate,
-                    predictions: updatedPredictions
+                    predictions: updatedPredictions,
+                    unifiedDecision: bundle.unifiedDecision
                 )
             )
             try? await repository.saveTruth(updatedTruth, for: sessionId)
@@ -1004,12 +1025,26 @@ final class AppModel: ObservableObject {
             ))
         }
 
-        let previousRouteEPrediction = activePredictions.first { $0.routeId == .E }
+        let previousUnifiedDecision = activeUnifiedDecision
+        unifiedDecisionEngine?.onWindow(window)
+        syncActiveUnifiedState()
+        syncWatchAutoStopState(previousDecision: previousUnifiedDecision, sessionId: sessionId)
+        postUnifiedDecisionSnapshot()
+
+        do {
+            try await saveUnifiedArtifacts(for: sessionId)
+        } catch {
+            await reportError(
+                title: "Failed to Save Unified Decision",
+                message: "Could not save unified artifacts: \(error.localizedDescription)",
+                severity: .warning
+            )
+        }
+
         routeRunner?.process(window: window)
         activePredictions = routeRunner?.currentPredictions() ?? activePredictions
         timelineTracker.sync(predictions: activePredictions, updatedAt: window.endTime)
         activeTimeline = timelineTracker.timeline
-        syncWatchAutoStopState(previousRouteEPrediction: previousRouteEPrediction, sessionId: sessionId)
         postPredictionSnapshot()
 
         // Handle prediction save errors
@@ -1031,25 +1066,40 @@ final class AppModel: ObservableObject {
         applyWatchRuntimeSnapshot(watchProvider.runtimeSnapshot(), recordEvents: recordEvents)
     }
 
-    private func syncWatchAutoStopState(previousRouteEPrediction: RoutePrediction?, sessionId: UUID) {
+    private func syncWatchAutoStopState(previousDecision: UnifiedSleepDecision?, sessionId: UUID) {
         guard currentSession?.sessionId == sessionId else { return }
-        guard let routeEPrediction = activePredictions.first(where: { $0.routeId == .E }) else {
-            cancelWatchAutoStop(reason: "routeEMissing")
+        guard shouldManageWatchAutoStop(for: sessionId) else {
+            cancelWatchAutoStop(reason: "watchNotManagedForSession")
+            return
+        }
+        guard let decision = activeUnifiedDecision else {
+            cancelWatchAutoStop(reason: "unifiedMissing")
             return
         }
 
-        if routeEPrediction.confidence == .confirmed {
-            guard previousRouteEPrediction?.confidence != .confirmed else { return }
+        if decision.state == .confirmed {
+            guard previousDecision?.state != .confirmed else { return }
             guard !didAutoStopWatchForCurrentSession else { return }
             guard watchAutoStopTask == nil else { return }
-            scheduleWatchAutoStop(for: sessionId, prediction: routeEPrediction)
+            scheduleWatchAutoStop(for: sessionId, decision: decision)
             return
         }
 
-        cancelWatchAutoStop(reason: "routeENotConfirmed")
+        cancelWatchAutoStop(reason: "unifiedNotConfirmed")
     }
 
-    private func scheduleWatchAutoStop(for sessionId: UUID, prediction: RoutePrediction) {
+    private func shouldManageWatchAutoStop(for sessionId: UUID) -> Bool {
+        guard let session = currentSession, session.sessionId == sessionId else { return false }
+        guard session.deviceCondition.hasWatch else { return false }
+        guard !session.disabledFeatures.contains("watchUnavailable") else { return false }
+        guard !session.disabledFeatures.contains("watchCompanionMissing") else { return false }
+
+        return hasIssuedWatchStartForCurrentSession ||
+            pendingWatchSessionStart ||
+            watchRuntimeSnapshot.activeSessionId == sessionId
+    }
+
+    private func scheduleWatchAutoStop(for sessionId: UUID, decision: UnifiedSleepDecision) {
         let delaySeconds = max(watchAutoStopDelaySeconds, 0)
         eventBus.post(
             RouteEvent(
@@ -1058,7 +1108,8 @@ final class AppModel: ObservableObject {
                 payload: [
                     "sessionId": sessionId.uuidString,
                     "delaySec": "\(Int(delaySeconds.rounded()))",
-                    "predictedTime": prediction.predictedSleepOnset.map { ISO8601DateFormatter.cached.string(from: $0) } ?? ""
+                    "confirmedAt": decision.confirmedAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                    "profile": decision.capabilityProfile.id
                 ]
             )
         )
@@ -1077,15 +1128,14 @@ final class AppModel: ObservableObject {
 
         guard currentSession?.sessionId == sessionId else { return }
         guard !didAutoStopWatchForCurrentSession else { return }
-        guard let routeEPrediction = activePredictions.first(where: { $0.routeId == .E }),
-              routeEPrediction.confidence == .confirmed else {
+        guard let decision = activeUnifiedDecision, decision.state == .confirmed else {
             eventBus.post(
                 RouteEvent(
                     routeId: .E,
                     eventType: "custom.watchAutoStopCancelled",
                     payload: [
                         "sessionId": sessionId.uuidString,
-                        "reason": "routeENotConfirmedAtDeadline"
+                        "reason": "unifiedNotConfirmedAtDeadline"
                     ]
                 )
             )
@@ -1102,7 +1152,8 @@ final class AppModel: ObservableObject {
                 payload: [
                     "sessionId": sessionId.uuidString,
                     "delaySec": "\(Int(max(watchAutoStopDelaySeconds, 0).rounded()))",
-                    "predictedTime": routeEPrediction.predictedSleepOnset.map { ISO8601DateFormatter.cached.string(from: $0) } ?? ""
+                    "confirmedAt": decision.confirmedAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                    "profile": decision.capabilityProfile.id
                 ]
             )
         )
@@ -1721,6 +1772,35 @@ final class AppModel: ObservableObject {
         ]
     }
 
+    private func syncActiveUnifiedState() {
+        activeUnifiedDecision = unifiedDecisionEngine?.currentDecision()
+        activeUnifiedTimeline = unifiedDecisionEngine?.currentTimeline()
+        activeUnifiedDiagnostics = unifiedDecisionEngine?.currentDiagnostics(
+            rawReferenceFileNames: [audioRuntimeSnapshot.activeRawCaptureFileName].compactMap { $0 }
+        )
+    }
+
+    private func saveUnifiedArtifacts(for sessionId: UUID) async throws {
+        let artifacts = UnifiedSessionArtifacts(
+            decision: activeUnifiedDecision,
+            timeline: activeUnifiedTimeline,
+            diagnostics: activeUnifiedDiagnostics
+        )
+        try await repository.saveUnifiedArtifacts(artifacts, for: sessionId)
+    }
+
+    private func persistUnifiedArtifacts(for sessionId: UUID) async {
+        do {
+            try await saveUnifiedArtifacts(for: sessionId)
+        } catch {
+            await reportError(
+                title: "Failed to Save Unified Decision",
+                message: "Could not save unified artifacts: \(error.localizedDescription)",
+                severity: .warning
+            )
+        }
+    }
+
     // MARK: - Error Reporting
 
     private func scenePhaseLabel(for phase: ScenePhase) -> String {
@@ -1762,6 +1842,23 @@ final class AppModel: ObservableObject {
             .joined(separator: "; ")
         postDiagnosticEvent(
             "system.predictionSnapshot",
+            payload: [
+                "summary": summary
+            ]
+        )
+    }
+
+    private func postUnifiedDecisionSnapshot() {
+        guard let decision = activeUnifiedDecision else { return }
+        let summary = [
+            "state=\(decision.state.rawValue)",
+            "profile=\(decision.capabilityProfile.id)",
+            "progress=\(decision.progressScore.formatted2)",
+            "candidate=\(decision.candidateAt?.formattedTime ?? "nil")",
+            "confirmed=\(decision.confirmedAt?.formattedTime ?? "nil")"
+        ].joined(separator: "; ")
+        postDiagnosticEvent(
+            "system.unifiedDecisionSnapshot",
             payload: [
                 "summary": summary
             ]
@@ -1885,11 +1982,35 @@ extension AppModel {
         watchSetupCompleted
     }
 
-    func debugUpdatePredictionsForWatchAutoStop(_ predictions: [RoutePrediction], session: Session) {
+    func debugUpdateUnifiedDecisionForWatchAutoStop(_ decision: UnifiedSleepDecision?, session: Session) {
         currentSession = session
-        let previousRouteEPrediction = activePredictions.first { $0.routeId == .E }
-        activePredictions = predictions
-        syncWatchAutoStopState(previousRouteEPrediction: previousRouteEPrediction, sessionId: session.sessionId)
+        hasIssuedWatchStartForCurrentSession =
+            session.deviceCondition.hasWatch &&
+            !session.disabledFeatures.contains("watchUnavailable") &&
+            !session.disabledFeatures.contains("watchCompanionMissing")
+        pendingWatchSessionStart = false
+        let previousDecision = activeUnifiedDecision
+        activeUnifiedDecision = decision
+        syncWatchAutoStopState(previousDecision: previousDecision, sessionId: session.sessionId)
+    }
+
+    func debugUpdatePredictionsForWatchAutoStop(_ predictions: [RoutePrediction], session: Session) {
+        let routeEPrediction = predictions.first { $0.routeId == .E }
+        let decision = UnifiedSleepDecision(
+            state: routeEPrediction?.confidence == .confirmed ? .confirmed : .monitoring,
+            capabilityProfile: UnifiedCapabilityProfile(channels: [.watchMotion, .watchHeartRate]),
+            episodeStartAt: routeEPrediction?.candidateAt ?? routeEPrediction?.predictedSleepOnset,
+            candidateAt: routeEPrediction?.candidateAt ?? routeEPrediction?.predictedSleepOnset,
+            confirmedAt: routeEPrediction?.confirmedAt ?? routeEPrediction?.predictedSleepOnset,
+            progressScore: routeEPrediction?.confidence == .confirmed ? 1 : 0,
+            candidateThreshold: 0.5,
+            confirmThreshold: 1,
+            evidenceSummary: routeEPrediction?.evidenceSummary ?? "Debug bridge",
+            denialSummary: nil,
+            isFinal: routeEPrediction?.confidence == .confirmed,
+            lastUpdated: routeEPrediction?.lastUpdated ?? session.startTime
+        )
+        debugUpdateUnifiedDecisionForWatchAutoStop(routeEPrediction == nil ? nil : decision, session: session)
     }
 
     func debugIsWatchAutoStopScheduled() -> Bool {

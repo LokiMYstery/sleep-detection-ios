@@ -561,24 +561,23 @@ enum TruthEvaluator {
 
     static func computeErrors(
         truthDate: Date,
-        predictions: [RoutePrediction]
+        predictions: [RoutePrediction],
+        unifiedDecision: UnifiedSleepDecision? = nil
     ) -> [String: RouteErrorRecord] {
-        predictions.reduce(into: [:]) { partialResult, prediction in
+        var errors = predictions.reduce(into: [String: RouteErrorRecord]()) { partialResult, prediction in
             guard let predicted = prediction.predictedSleepOnset else { return }
-            let deltaMinutes = predicted.timeIntervalSince(truthDate) / 60
-            let direction: TruthDirection
-            if deltaMinutes == 0 {
-                direction = .exact
-            } else if deltaMinutes < 0 {
-                direction = .early
-            } else {
-                direction = .late
-            }
-            partialResult[prediction.routeId.rawValue] = RouteErrorRecord(
-                errorMinutes: abs(deltaMinutes),
-                direction: direction
+            partialResult[prediction.routeId.rawValue] = UnifiedDecisionErrorComputer.routeError(
+                predictedDate: predicted,
+                truthDate: truthDate
             )
         }
+        if let unifiedError = UnifiedDecisionErrorComputer.computeError(
+            truthDate: truthDate,
+            decision: unifiedDecision
+        ) {
+            errors["unified"] = unifiedError
+        }
+        return errors
     }
 
     private static func truthRelevantSamples(
@@ -894,7 +893,8 @@ actor LiveTruthRefillService: TruthRefillService {
                     retrievedAt: now,
                     errors: TruthEvaluator.computeErrors(
                         truthDate: truthSample.startDate,
-                        predictions: bundle.referencePredictions
+                        predictions: bundle.referencePredictions,
+                        unifiedDecision: bundle.unifiedDecision
                     )
                 )
 
@@ -941,6 +941,7 @@ actor LiveExportService: ExportService {
         let bundles = try await repository.loadBundles()
         let header = [
             "date", "startTime", "priorLevel", "hasWatch",
+            "unified_state", "unified_profile", "unified_candidate_at", "unified_confirmed_at", "unified_error_min",
             "routeA_prediction", "routeA_error_min",
             "routeB_prediction", "routeB_error_min",
             "routeC_prediction", "routeC_error_min",
@@ -953,6 +954,12 @@ actor LiveExportService: ExportService {
         let rows = bundles.map { bundle in
             let predictions = bundle.referencePredictions.byRoute
             let truth = bundle.referenceTruth
+            let unifiedDecision = bundle.unifiedDecision
+            let unifiedState = unifiedDecision?.state.rawValue ?? ""
+            let unifiedProfile = unifiedDecision?.capabilityProfile.id ?? ""
+            let unifiedCandidateAt = unifiedDecision?.candidateAt?.csvTimestamp ?? ""
+            let unifiedConfirmedAt = unifiedDecision?.confirmedAt?.csvTimestamp ?? ""
+            let unifiedError = truth?.errors["unified"]?.errorMinutes.description ?? ""
             let aPrediction = predictions[.A]?.predictedSleepOnset?.csvTimestamp ?? ""
             let bPrediction = predictions[.B]?.predictedSleepOnset?.csvTimestamp ?? ""
             let cPrediction = predictions[.C]?.predictedSleepOnset?.csvTimestamp ?? ""
@@ -972,6 +979,11 @@ actor LiveExportService: ExportService {
                 bundle.session.startTime.csvTimestamp,
                 bundle.session.priorLevel.rawValue,
                 bundle.session.deviceCondition.hasWatch.description,
+                unifiedState,
+                unifiedProfile,
+                unifiedCandidateAt,
+                unifiedConfirmedAt,
+                unifiedError,
                 aPrediction,
                 aError,
                 bPrediction,
@@ -999,7 +1011,7 @@ actor LiveExportService: ExportService {
 
     func exportEvaluationJSON() async throws -> URL {
         let bundles = try await repository.loadBundles()
-        let payload = SessionAnalytics.exportPayload(from: bundles)
+        let payload = UnifiedSessionAnalytics.exportPayload(from: bundles)
         let data = try JSONEncoder.pretty.encode(payload)
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("SleepPOC-evaluation.json")

@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Watch Auto Stop")
 struct WatchAutoStopTests {
-    @Test("AppModel auto-stops watch collection after Route E confirmation delay")
+    @Test("AppModel auto-stops watch collection after unified confirmation delay")
     @MainActor
     func appModelAutoStopsWatchCollectionAfterConfirmation() async throws {
         let watchProvider = AutoStopRecordingWatchProvider()
@@ -20,17 +20,21 @@ struct WatchAutoStopTests {
             enabledRoutes: RouteId.allCases
         )
 
-        model.debugUpdatePredictionsForWatchAutoStop(
-            [
-                RoutePrediction(
-                    routeId: .E,
-                    predictedSleepOnset: start.addingTimeInterval(120),
-                    confidence: .confirmed,
-                    evidenceSummary: "Watch fusion confirmed",
-                    lastUpdated: start.addingTimeInterval(120),
-                    isAvailable: true
-                )
-            ],
+        model.debugUpdateUnifiedDecisionForWatchAutoStop(
+            UnifiedSleepDecision(
+                state: .confirmed,
+                capabilityProfile: UnifiedCapabilityProfile(channels: [.watchMotion, .watchHeartRate, .phoneMotion, .phoneInteraction]),
+                episodeStartAt: start.addingTimeInterval(60),
+                candidateAt: start.addingTimeInterval(90),
+                confirmedAt: start.addingTimeInterval(120),
+                progressScore: 3.2,
+                candidateThreshold: 1.5,
+                confirmThreshold: 3,
+                evidenceSummary: "Unified chain confirmed sleep",
+                denialSummary: nil,
+                isFinal: true,
+                lastUpdated: start.addingTimeInterval(120)
+            ),
             session: session
         )
 
@@ -41,7 +45,7 @@ struct WatchAutoStopTests {
         #expect(model.debugDidAutoStopWatchForCurrentSession())
     }
 
-    @Test("AppModel cancels watch auto-stop if Route E loses confirmation before deadline")
+    @Test("AppModel cancels watch auto-stop if unified confirmation is lost before deadline")
     @MainActor
     func appModelCancelsWatchAutoStopWhenConfirmationIsLost() async throws {
         let watchProvider = AutoStopRecordingWatchProvider()
@@ -57,39 +61,87 @@ struct WatchAutoStopTests {
             enabledRoutes: RouteId.allCases
         )
 
-        model.debugUpdatePredictionsForWatchAutoStop(
-            [
-                RoutePrediction(
-                    routeId: .E,
-                    predictedSleepOnset: start.addingTimeInterval(120),
-                    confidence: .confirmed,
-                    evidenceSummary: "Watch fusion confirmed",
-                    lastUpdated: start.addingTimeInterval(120),
-                    isAvailable: true
-                )
-            ],
+        model.debugUpdateUnifiedDecisionForWatchAutoStop(
+            UnifiedSleepDecision(
+                state: .confirmed,
+                capabilityProfile: UnifiedCapabilityProfile(channels: [.watchMotion, .watchHeartRate]),
+                episodeStartAt: start.addingTimeInterval(60),
+                candidateAt: start.addingTimeInterval(90),
+                confirmedAt: start.addingTimeInterval(120),
+                progressScore: 3.1,
+                candidateThreshold: 1.5,
+                confirmThreshold: 3,
+                evidenceSummary: "Unified chain confirmed sleep",
+                denialSummary: nil,
+                isFinal: true,
+                lastUpdated: start.addingTimeInterval(120)
+            ),
             session: session
         )
 
         #expect(model.debugIsWatchAutoStopScheduled())
 
-        model.debugUpdatePredictionsForWatchAutoStop(
-            [
-                RoutePrediction(
-                    routeId: .E,
-                    predictedSleepOnset: nil,
-                    confidence: .none,
-                    evidenceSummary: "Monitoring Watch motion + heart rate + iPhone interaction",
-                    lastUpdated: start.addingTimeInterval(150),
-                    isAvailable: true
-                )
-            ],
+        model.debugUpdateUnifiedDecisionForWatchAutoStop(
+            UnifiedSleepDecision(
+                state: .monitoring,
+                capabilityProfile: UnifiedCapabilityProfile(channels: [.watchMotion, .watchHeartRate]),
+                episodeStartAt: nil,
+                candidateAt: nil,
+                confirmedAt: nil,
+                progressScore: 0.4,
+                candidateThreshold: 1.5,
+                confirmThreshold: 3,
+                evidenceSummary: "Monitoring unified evidence",
+                denialSummary: nil,
+                isFinal: false,
+                lastUpdated: start.addingTimeInterval(150)
+            ),
             session: session
         )
 
         #expect(!model.debugIsWatchAutoStopScheduled())
         try await Task.sleep(nanoseconds: 120_000_000)
 
+        #expect(watchProvider.stopCallCount == 0)
+        #expect(!model.debugDidAutoStopWatchForCurrentSession())
+    }
+
+    @Test("AppModel does not schedule watch auto-stop for phone-only unified confirmations")
+    @MainActor
+    func appModelDoesNotScheduleWatchAutoStopForPhoneOnlySession() async throws {
+        let watchProvider = AutoStopRecordingWatchProvider()
+        let model = AppModel(
+            watchProvider: watchProvider,
+            watchAutoStopDelaySeconds: 0.01
+        )
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+
+        model.debugUpdateUnifiedDecisionForWatchAutoStop(
+            UnifiedSleepDecision(
+                state: .confirmed,
+                capabilityProfile: UnifiedCapabilityProfile(channels: [.phoneMotion, .phoneInteraction]),
+                episodeStartAt: start.addingTimeInterval(60),
+                candidateAt: start.addingTimeInterval(90),
+                confirmedAt: start.addingTimeInterval(120),
+                progressScore: 3.0,
+                candidateThreshold: 1.5,
+                confirmThreshold: 3.0,
+                evidenceSummary: "Phone-only unified confirmation",
+                denialSummary: nil,
+                isFinal: true,
+                lastUpdated: start.addingTimeInterval(120)
+            ),
+            session: session
+        )
+
+        #expect(!model.debugIsWatchAutoStopScheduled())
+        try await Task.sleep(nanoseconds: 50_000_000)
         #expect(watchProvider.stopCallCount == 0)
         #expect(!model.debugDidAutoStopWatchForCurrentSession())
     }

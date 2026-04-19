@@ -7,6 +7,7 @@ protocol SessionRepository: Sendable {
     func appendEvent(_ event: RouteEvent, to sessionId: UUID) async throws
     func savePredictions(_ predictions: [RoutePrediction], for sessionId: UUID) async throws
     func saveTimeline(_ timeline: SleepTimeline, for sessionId: UUID) async throws
+    func saveUnifiedArtifacts(_ artifacts: UnifiedSessionArtifacts, for sessionId: UUID) async throws
     func saveTruth(_ truth: TruthRecord, for sessionId: UUID) async throws
     func loadBundles() async throws -> [SessionBundle]
     func loadBundle(sessionId: UUID) async throws -> SessionBundle?
@@ -69,6 +70,14 @@ actor FileSessionRepository: SessionRepository {
         )
     }
 
+    func saveUnifiedArtifacts(_ artifacts: UnifiedSessionArtifacts, for sessionId: UUID) async throws {
+        try ensureSessionDirectory(sessionId)
+        try writeJSON(
+            artifacts,
+            to: sessionURL(for: sessionId, fileName: "unified.json")
+        )
+    }
+
     func saveTruth(_ truth: TruthRecord, for sessionId: UUID) async throws {
         try ensureSessionDirectory(sessionId)
         try writeJSON(truth, to: sessionURL(for: sessionId, fileName: "truth.json"))
@@ -93,13 +102,15 @@ actor FileSessionRepository: SessionRepository {
                 for: session
             )
             let timeline = try readTimeline(from: directory.appendingPathComponent("timeline.json"))
+            let unifiedArtifacts = try readUnifiedArtifacts(from: directory.appendingPathComponent("unified.json"))
             return SessionBundle(
                 session: session,
                 windows: windows,
                 events: events,
                 predictions: predictions,
                 truth: truth,
-                timeline: timeline
+                timeline: timeline,
+                unifiedArtifacts: unifiedArtifacts
             )
         }
         .sorted { $0.session.startTime > $1.session.startTime }
@@ -118,7 +129,16 @@ actor FileSessionRepository: SessionRepository {
             for: session
         )
         let timeline = try readTimeline(from: directory.appendingPathComponent("timeline.json"))
-        return SessionBundle(session: session, windows: windows, events: events, predictions: predictions, truth: truth, timeline: timeline)
+        let unifiedArtifacts = try readUnifiedArtifacts(from: directory.appendingPathComponent("unified.json"))
+        return SessionBundle(
+            session: session,
+            windows: windows,
+            events: events,
+            predictions: predictions,
+            truth: truth,
+            timeline: timeline,
+            unifiedArtifacts: unifiedArtifacts
+        )
     }
 
     func loadWindows(sessionId: UUID) async throws -> [FeatureWindow] {
@@ -178,6 +198,11 @@ actor FileSessionRepository: SessionRepository {
     private func readTimeline(from url: URL) throws -> SleepTimeline? {
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try readJSON(SleepTimeline.self, from: url)
+    }
+
+    private func readUnifiedArtifacts(from url: URL) throws -> UnifiedSessionArtifacts? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try readJSON(UnifiedSessionArtifacts.self, from: url)
     }
 
     private func ensureBaseDirectory() throws {

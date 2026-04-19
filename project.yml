@@ -49,6 +49,7 @@ targets:
     sources:
       - path: SleepDetectionWatchApp
       - path: SleepDetectionPOC/Core/Domain/Models.swift
+      - path: SleepDetectionPOC/Core/Domain/UnifiedModels.swift
       - path: SleepDetectionPOC/Core/Domain/Settings.swift
     settings:
       base:

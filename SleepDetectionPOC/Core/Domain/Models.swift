@@ -1801,6 +1801,7 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
     var predictions: [RoutePrediction]
     var truth: TruthRecord?
     var timeline: SleepTimeline? = nil
+    var unifiedArtifacts: UnifiedSessionArtifacts? = nil
 
     var sampleQuality: SampleQuality {
         if session.status == .archived && truth == nil {
@@ -1817,6 +1818,18 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
 
     var phonePlacementLabel: String {
         PhonePlacement(rawValue: session.phonePlacement ?? "")?.displayName ?? "Not set"
+    }
+
+    var unifiedDecision: UnifiedSleepDecision? {
+        unifiedArtifacts?.decision
+    }
+
+    var unifiedTimeline: UnifiedSleepTimeline? {
+        unifiedArtifacts?.timeline
+    }
+
+    var unifiedDiagnostics: UnifiedDecisionDiagnostics? {
+        unifiedArtifacts?.diagnostics
     }
 
     var anomalyTags: [String] {
@@ -1912,7 +1925,8 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
         guard truth.isResolvedOnset, let truthDate = truth.healthKitSleepOnset else { return truth }
         truth.errors = Self.computeErrors(
             truthDate: truthDate,
-            predictions: referencePredictions
+            predictions: referencePredictions,
+            unifiedDecision: unifiedDecision
         )
         return truth
     }
@@ -2015,24 +2029,23 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
 
     private static func computeErrors(
         truthDate: Date,
-        predictions: [RoutePrediction]
+        predictions: [RoutePrediction],
+        unifiedDecision: UnifiedSleepDecision? = nil
     ) -> [String: RouteErrorRecord] {
-        predictions.reduce(into: [:]) { partialResult, prediction in
+        var errors = predictions.reduce(into: [String: RouteErrorRecord]()) { partialResult, prediction in
             guard let predicted = prediction.predictedSleepOnset else { return }
-            let deltaMinutes = predicted.timeIntervalSince(truthDate) / 60
-            let direction: TruthDirection
-            if deltaMinutes == 0 {
-                direction = .exact
-            } else if deltaMinutes < 0 {
-                direction = .early
-            } else {
-                direction = .late
-            }
-            partialResult[prediction.routeId.rawValue] = RouteErrorRecord(
-                errorMinutes: abs(deltaMinutes),
-                direction: direction
+            partialResult[prediction.routeId.rawValue] = UnifiedDecisionErrorComputer.routeError(
+                predictedDate: predicted,
+                truthDate: truthDate
             )
         }
+        if let unifiedError = UnifiedDecisionErrorComputer.computeError(
+            truthDate: truthDate,
+            decision: unifiedDecision
+        ) {
+            errors["unified"] = unifiedError
+        }
+        return errors
     }
 }
 
@@ -2052,6 +2065,7 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
     var latchedPredictions: [RoutePrediction]
     var truth: TruthRecord?
     var timeline: SleepTimeline?
+    var unifiedArtifacts: UnifiedSessionArtifacts?
     var diagnostics: SessionDiagnosticsSummary
 
     init(bundle: SessionBundle) {
@@ -2062,6 +2076,7 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
         self.latchedPredictions = bundle.latchedPredictions
         self.truth = bundle.referenceTruth
         self.timeline = bundle.timeline
+        self.unifiedArtifacts = bundle.unifiedArtifacts
         self.diagnostics = bundle.diagnostics
     }
 }
@@ -2101,9 +2116,24 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
         var evidenceSummary: String
     }
 
+    struct UnifiedStatus: Codable, Equatable, Sendable {
+        var state: UnifiedDecisionState
+        var capabilityProfileId: String
+        var episodeStartAt: Date?
+        var candidateAt: Date?
+        var confirmedAt: Date?
+        var progressScore: Double
+        var lastUpdated: Date
+        var evidenceSummary: String
+        var denialSummary: String?
+        var latestChannelSnapshots: [UnifiedChannelSnapshot]
+        var evidenceSnapshotCount: Int
+    }
+
     var scenePhaseChanges: [ScenePhaseChange]
     var windowSummary: WindowSummary
     var predictionSnapshots: [PredictionSnapshot]
+    var unifiedStatus: UnifiedStatus?
     var routeStatuses: [RouteStatus]
     var latchedRouteStatuses: [RouteStatus]
     var audioRuntime: AudioRuntimeSnapshot?
@@ -2150,6 +2180,24 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
                 timestamp: event.timestamp,
                 summary: event.payload["summary"] ?? ""
             )
+        }
+        if let decision = bundle.unifiedDecision {
+            let latestSnapshot = bundle.unifiedDiagnostics?.evidenceSnapshots.last
+            self.unifiedStatus = UnifiedStatus(
+                state: decision.state,
+                capabilityProfileId: decision.capabilityProfile.id,
+                episodeStartAt: decision.episodeStartAt,
+                candidateAt: decision.candidateAt,
+                confirmedAt: decision.confirmedAt,
+                progressScore: decision.progressScore,
+                lastUpdated: decision.lastUpdated,
+                evidenceSummary: decision.evidenceSummary,
+                denialSummary: decision.denialSummary,
+                latestChannelSnapshots: latestSnapshot?.channelSnapshots ?? [],
+                evidenceSnapshotCount: bundle.unifiedDiagnostics?.evidenceSnapshots.count ?? 0
+            )
+        } else {
+            self.unifiedStatus = nil
         }
         self.routeStatuses = RouteId.allCases.compactMap { routeId in
             guard let prediction = bundle.predictions.byRoute[routeId] else { return nil }
@@ -2226,6 +2274,9 @@ struct SessionDiagnosticsSummary: Codable, Equatable, Sendable {
         }
         if let watchRuntime, watchRuntime.lastError != nil {
             alerts.append("Watch runtime reported an error during this session")
+        }
+        if let unifiedStatus, unifiedStatus.state == .noResult {
+            alerts.append("Unified decision ended without confirmation")
         }
         self.alerts = alerts
     }
