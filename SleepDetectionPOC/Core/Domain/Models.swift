@@ -1589,6 +1589,15 @@ struct RouteErrorRecord: Codable, Equatable, Sendable {
     var direction: TruthDirection
 }
 
+struct TruthSelectionDiagnostics: Codable, Equatable, Sendable {
+    var selectorVersion: String
+    var selectionWindowStart: Date
+    var selectionWindowEnd: Date
+    var nextSessionStart: Date?
+    var matchedIntervalStart: Date?
+    var matchedIntervalEnd: Date?
+}
+
 struct TruthRecord: Codable, Equatable, Sendable {
     var hasTruth: Bool
     var healthKitSleepOnset: Date?
@@ -1596,6 +1605,7 @@ struct TruthRecord: Codable, Equatable, Sendable {
     var retrievedAt: Date
     var errors: [String: RouteErrorRecord]
     var resolution: TruthResolution?
+    var selectionDiagnostics: TruthSelectionDiagnostics?
 
     init(
         hasTruth: Bool,
@@ -1603,13 +1613,15 @@ struct TruthRecord: Codable, Equatable, Sendable {
         healthKitSource: String?,
         retrievedAt: Date,
         errors: [String: RouteErrorRecord],
-        resolution: TruthResolution? = nil
+        resolution: TruthResolution? = nil,
+        selectionDiagnostics: TruthSelectionDiagnostics? = nil
     ) {
         self.hasTruth = hasTruth
         self.healthKitSleepOnset = healthKitSleepOnset
         self.healthKitSource = healthKitSource
         self.retrievedAt = retrievedAt
         self.errors = errors
+        self.selectionDiagnostics = selectionDiagnostics
         if let resolution {
             self.resolution = resolution
         } else if hasTruth, healthKitSleepOnset != nil {
@@ -1624,7 +1636,8 @@ struct TruthRecord: Codable, Equatable, Sendable {
         healthKitSleepOnset: Date?,
         healthKitSource: String?,
         retrievedAt: Date,
-        errors: [String: RouteErrorRecord]
+        errors: [String: RouteErrorRecord],
+        selectionDiagnostics: TruthSelectionDiagnostics? = nil
     ) {
         self.init(
             hasTruth: resolution == .resolvedOnset,
@@ -1632,7 +1645,8 @@ struct TruthRecord: Codable, Equatable, Sendable {
             healthKitSource: healthKitSource,
             retrievedAt: retrievedAt,
             errors: errors,
-            resolution: resolution
+            resolution: resolution,
+            selectionDiagnostics: selectionDiagnostics
         )
     }
 
@@ -1820,16 +1834,31 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
         PhonePlacement(rawValue: session.phonePlacement ?? "")?.displayName ?? "Not set"
     }
 
+    var effectiveUnifiedArtifacts: UnifiedSessionArtifacts? {
+        let recovered = Self.recoveredUnifiedArtifacts(from: events)
+
+        if let unifiedArtifacts {
+            let merged = UnifiedSessionArtifacts(
+                decision: unifiedArtifacts.decision ?? recovered?.decision,
+                timeline: unifiedArtifacts.timeline ?? recovered?.timeline,
+                diagnostics: unifiedArtifacts.diagnostics ?? recovered?.diagnostics
+            )
+            return merged.isEmpty ? nil : merged
+        }
+
+        return recovered?.isEmpty == false ? recovered : nil
+    }
+
     var unifiedDecision: UnifiedSleepDecision? {
-        unifiedArtifacts?.decision
+        effectiveUnifiedArtifacts?.decision
     }
 
     var unifiedTimeline: UnifiedSleepTimeline? {
-        unifiedArtifacts?.timeline
+        effectiveUnifiedArtifacts?.timeline
     }
 
     var unifiedDiagnostics: UnifiedDecisionDiagnostics? {
-        unifiedArtifacts?.diagnostics
+        effectiveUnifiedArtifacts?.diagnostics
     }
 
     var anomalyTags: [String] {
@@ -2047,6 +2076,219 @@ struct SessionBundle: Codable, Identifiable, Equatable, Sendable {
         }
         return errors
     }
+
+    private struct RecoveredUnifiedSnapshot: Equatable {
+        var state: UnifiedDecisionState
+        var profile: UnifiedCapabilityProfile
+        var summary: String
+        var timestamp: Date
+    }
+
+    private static func recoveredUnifiedArtifacts(from events: [RouteEvent]) -> UnifiedSessionArtifacts? {
+        let relevantEvents = events.filter {
+            $0.eventType.hasPrefix("unified.") || $0.eventType == "system.unifiedDecisionSnapshot"
+        }
+        guard !relevantEvents.isEmpty else { return nil }
+
+        let snapshot = recoveredUnifiedSnapshot(from: relevantEvents)
+        let profile = snapshot?.profile ?? recoveredUnifiedCapabilityProfile(from: relevantEvents)
+        let decision = recoveredUnifiedDecision(from: relevantEvents, snapshot: snapshot, profile: profile)
+        let timeline = recoveredUnifiedTimeline(decision: decision)
+        let recovered = UnifiedSessionArtifacts(
+            decision: decision,
+            timeline: timeline,
+            diagnostics: nil
+        )
+        return recovered.isEmpty ? nil : recovered
+    }
+
+    private static func recoveredUnifiedDecision(
+        from events: [RouteEvent],
+        snapshot: RecoveredUnifiedSnapshot?,
+        profile: UnifiedCapabilityProfile
+    ) -> UnifiedSleepDecision? {
+        let parameters = UnifiedLearningProfile.empty.parameters(for: profile)
+        if let confirmedEvent = events.last(where: { $0.eventType == "unified.confirmedSleep" }) {
+            return UnifiedSleepDecision(
+                state: .confirmed,
+                capabilityProfile: profile,
+                episodeStartAt: parseRecoveredDate(confirmedEvent.payload["episodeStartAt"]),
+                candidateAt: parseRecoveredDate(confirmedEvent.payload["candidateAt"]),
+                confirmedAt: parseRecoveredDate(confirmedEvent.payload["confirmedAt"]) ?? confirmedEvent.timestamp,
+                progressScore: Double(confirmedEvent.payload["progressScore"] ?? "") ?? parameters.confirmThreshold,
+                candidateThreshold: parameters.candidateThreshold,
+                confirmThreshold: parameters.confirmThreshold,
+                evidenceSummary: "Recovered unified confirmation from event log",
+                denialSummary: nil,
+                isFinal: true,
+                lastUpdated: confirmedEvent.timestamp
+            )
+        }
+
+        let lastCandidateEvent = events.last(where: { $0.eventType == "unified.candidateEntered" })
+        let lastRollbackEvent = events.last(where: { $0.eventType == "unified.candidateRolledBack" })
+
+        if let snapshot {
+            switch snapshot.state {
+            case .candidate:
+                guard let candidateEvent = lastCandidateEvent else { return nil }
+                guard lastRollbackEvent == nil || candidateEvent.timestamp > lastRollbackEvent?.timestamp ?? .distantPast else {
+                    return nil
+                }
+                let candidateAt = parseRecoveredDate(candidateEvent.payload["time"]) ?? candidateEvent.timestamp
+                return UnifiedSleepDecision(
+                    state: .candidate,
+                    capabilityProfile: snapshot.profile,
+                    episodeStartAt: nil,
+                    candidateAt: candidateAt,
+                    confirmedAt: nil,
+                    progressScore: Double(candidateEvent.payload["progressScore"] ?? "") ?? parameters.candidateThreshold,
+                    candidateThreshold: parameters.candidateThreshold,
+                    confirmThreshold: parameters.confirmThreshold,
+                    evidenceSummary: snapshot.summary,
+                    denialSummary: nil,
+                    isFinal: false,
+                    lastUpdated: snapshot.timestamp
+                )
+            case .monitoring, .noResult, .unavailable:
+                return UnifiedSleepDecision(
+                    state: snapshot.state,
+                    capabilityProfile: snapshot.profile,
+                    episodeStartAt: nil,
+                    candidateAt: nil,
+                    confirmedAt: nil,
+                    progressScore: 0,
+                    candidateThreshold: parameters.candidateThreshold,
+                    confirmThreshold: parameters.confirmThreshold,
+                    evidenceSummary: snapshot.summary,
+                    denialSummary: nil,
+                    isFinal: snapshot.state == .noResult || snapshot.state == .unavailable,
+                    lastUpdated: snapshot.timestamp
+                )
+            case .confirmed:
+                return UnifiedSleepDecision(
+                    state: .confirmed,
+                    capabilityProfile: snapshot.profile,
+                    episodeStartAt: nil,
+                    candidateAt: nil,
+                    confirmedAt: nil,
+                    progressScore: parameters.confirmThreshold,
+                    candidateThreshold: parameters.candidateThreshold,
+                    confirmThreshold: parameters.confirmThreshold,
+                    evidenceSummary: snapshot.summary,
+                    denialSummary: nil,
+                    isFinal: true,
+                    lastUpdated: snapshot.timestamp
+                )
+            }
+        }
+
+        guard let candidateEvent = lastCandidateEvent else { return nil }
+        guard lastRollbackEvent == nil || candidateEvent.timestamp > lastRollbackEvent?.timestamp ?? .distantPast else {
+            return nil
+        }
+        let candidateAt = parseRecoveredDate(candidateEvent.payload["time"]) ?? candidateEvent.timestamp
+        return UnifiedSleepDecision(
+            state: .candidate,
+            capabilityProfile: profile,
+            episodeStartAt: nil,
+            candidateAt: candidateAt,
+            confirmedAt: nil,
+            progressScore: Double(candidateEvent.payload["progressScore"] ?? "") ?? parameters.candidateThreshold,
+            candidateThreshold: parameters.candidateThreshold,
+            confirmThreshold: parameters.confirmThreshold,
+            evidenceSummary: "Recovered unified candidate from event log",
+            denialSummary: nil,
+            isFinal: false,
+            lastUpdated: candidateEvent.timestamp
+        )
+    }
+
+    private static func recoveredUnifiedTimeline(
+        decision: UnifiedSleepDecision?
+    ) -> UnifiedSleepTimeline? {
+        guard let decision else { return nil }
+        return UnifiedSleepTimeline(
+            latestState: decision.state,
+            primaryEpisode: UnifiedTimelineEpisode(
+                episodeStartAt: decision.episodeStartAt,
+                candidateAt: decision.candidateAt,
+                confirmedAt: decision.confirmedAt,
+                endedAt: nil,
+                state: decision.state,
+                summary: decision.evidenceSummary
+            ),
+            lastUpdated: decision.lastUpdated
+        )
+    }
+
+    private static func recoveredUnifiedCapabilityProfile(from events: [RouteEvent]) -> UnifiedCapabilityProfile {
+        guard let rawProfile = events.reversed().compactMap({ $0.payload["profile"] }).first else {
+            return UnifiedCapabilityProfile(channels: [])
+        }
+
+        let channels = rawProfile
+            .split(separator: "+")
+            .compactMap { UnifiedDecisionChannel(rawValue: String($0)) }
+        return UnifiedCapabilityProfile(channels: channels)
+    }
+
+    private static func recoveredUnifiedSnapshot(from events: [RouteEvent]) -> RecoveredUnifiedSnapshot? {
+        guard let snapshotEvent = events.last(where: { $0.eventType == "system.unifiedDecisionSnapshot" }) else {
+            return nil
+        }
+
+        let summary = snapshotEvent.payload["summary"] ?? ""
+        let fields = Dictionary(
+            uniqueKeysWithValues: summary
+                .split(separator: ";")
+                .compactMap { component -> (String, String)? in
+                    let parts = component.split(separator: "=", maxSplits: 1)
+                    guard parts.count == 2 else { return nil }
+                    let key = parts[0].trimmingCharacters(in: .whitespaces)
+                    let value = parts[1].trimmingCharacters(in: .whitespaces)
+                    return (key, value)
+                }
+        )
+        guard
+            let rawState = fields["state"],
+            let state = UnifiedDecisionState(rawValue: rawState)
+        else {
+            return nil
+        }
+
+        let profile = recoveredUnifiedCapabilityProfile(
+            fromRawProfile: fields["profile"]
+        )
+        return RecoveredUnifiedSnapshot(
+            state: state,
+            profile: profile,
+            summary: summary.isEmpty ? "Recovered unified \(state.rawValue) state from event log" : summary,
+            timestamp: snapshotEvent.timestamp
+        )
+    }
+
+    private static func recoveredUnifiedCapabilityProfile(fromRawProfile rawProfile: String?) -> UnifiedCapabilityProfile {
+        guard let rawProfile, !rawProfile.isEmpty else {
+            return UnifiedCapabilityProfile(channels: [])
+        }
+        let channels = rawProfile
+            .split(separator: "+")
+            .compactMap { UnifiedDecisionChannel(rawValue: String($0)) }
+        return UnifiedCapabilityProfile(channels: channels)
+    }
+
+    private static func parseRecoveredDate(_ rawValue: String?) -> Date? {
+        guard let rawValue, !rawValue.isEmpty else { return nil }
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = fractionalFormatter.date(from: rawValue) {
+            return parsed
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: rawValue)
+    }
 }
 
 extension Array where Element == RoutePrediction {
@@ -2076,7 +2318,7 @@ struct SessionExportPayload: Codable, Equatable, Sendable {
         self.latchedPredictions = bundle.latchedPredictions
         self.truth = bundle.referenceTruth
         self.timeline = bundle.timeline
-        self.unifiedArtifacts = bundle.unifiedArtifacts
+        self.unifiedArtifacts = bundle.effectiveUnifiedArtifacts
         self.diagnostics = bundle.diagnostics
     }
 }

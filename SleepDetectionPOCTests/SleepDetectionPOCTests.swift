@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import SleepDetectionPOC
+#if canImport(HealthKit)
+import HealthKit
+#endif
 
 @Suite("SleepDetectionPOC")
 struct SleepDetectionPOCTests {
@@ -771,8 +774,8 @@ struct SleepDetectionPOCTests {
         #expect(Set(third.sourceBundles) == Set(["sleep-a", "sleep-b"]))
     }
 
-    @Test("Truth evaluator selects post-awake canonical asleep interval when awake overlaps prior sleep")
-    func truthSelectionUsesCanonicalizedAwakeBoundary() {
+    @Test("Truth evaluator respects the duration gate after awake splits an early sleep interval")
+    func truthSelectionRespectsDurationGateAfterAwakeSplit() {
         let session = Session.make(
             startTime: Date(timeIntervalSince1970: 1_700_000_000),
             deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
@@ -815,6 +818,54 @@ struct SleepDetectionPOCTests {
 
         let selected = TruthEvaluator.selectTruth(for: session, from: samples)
         #expect(selected?.sourceBundle == "qualifying")
+    }
+
+    @Test("Truth evaluator limits session truth lookup to before the next session starts")
+    func truthSelectionStopsAtNextSessionBoundary() {
+        let firstSession = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_700_000_000),
+            deviceCondition: DeviceCondition(hasWatch: false, watchReachable: false, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let nextSessionStart = firstSession.startTime.addingTimeInterval(3_600)
+        let samples = [
+            SleepSample(
+                startDate: firstSession.startTime.addingTimeInterval(1_200),
+                endDate: firstSession.startTime.addingTimeInterval(2_400),
+                sourceBundle: "first-session",
+                isUserEntered: false
+            ),
+            SleepSample(
+                startDate: firstSession.startTime.addingTimeInterval(4_200),
+                endDate: firstSession.startTime.addingTimeInterval(5_700),
+                sourceBundle: "next-session",
+                isUserEntered: false
+            )
+        ]
+
+        let firstSelected = TruthEvaluator.selectTruth(
+            for: firstSession,
+            from: samples,
+            nextSessionStart: nextSessionStart
+        )
+
+        #expect(firstSelected?.sourceBundle == "first-session")
+
+        let noBoundarySelected = TruthEvaluator.selectTruth(
+            for: firstSession,
+            from: [
+                SleepSample(
+                    startDate: firstSession.startTime.addingTimeInterval(4_200),
+                    endDate: firstSession.startTime.addingTimeInterval(5_700),
+                    sourceBundle: "next-session",
+                    isUserEntered: false
+                )
+            ],
+            nextSessionStart: nextSessionStart
+        )
+
+        #expect(noBoundarySelected == nil)
     }
 
     @Test("Truth evaluator terminalizes to no qualifying sleep after grace period")
@@ -2800,6 +2851,210 @@ struct SleepDetectionPOCTests {
         #expect(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "confirmedSleep" } == nil)
     }
 
+    @Test("Route E confirms via the weak no-baseline HR path with fewer behavioral windows")
+    @MainActor
+    func routeEConfirmsViaNoBaselineWeakHeartRatePath() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            wristActiveResetWindowCount: 2,
+            hrConfirmSampleCount: 2,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 2,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 3,
+            extendedConfirmWindowCount: 3,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let bus = EventBus()
+        let engine = RouteEEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P3,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: nil,
+                sleepHRTarget: nil,
+                hrDropThreshold: nil
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 400,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(accelRMS: 0.005, peakCount: 0, attitudeChangeRate: 0, maxAccel: 0.01, stillRatio: 1, stillDuration: 30),
+                audio: nil,
+                interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 300, screenWakeCount: 0, lastInteractionAt: start.addingTimeInterval(-270)),
+                watch: nil
+            )
+        )
+
+        func watchWindow(id: Int, startOffset: TimeInterval, endOffset: TimeInterval) -> FeatureWindow {
+            FeatureWindow(
+                windowId: id,
+                startTime: start.addingTimeInterval(startOffset),
+                endTime: start.addingTimeInterval(endOffset),
+                duration: endOffset - startOffset,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.01,
+                    wristStillDuration: endOffset - startOffset,
+                    heartRate: 61,
+                    heartRateSampleDate: start.addingTimeInterval(endOffset - 5),
+                    heartRateTrend: .stable,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        }
+
+        engine.onWindow(watchWindow(id: 0, startOffset: 30, endOffset: 90))
+        engine.onWindow(watchWindow(id: 1, startOffset: 90, endOffset: 150))
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate || prediction.confidence == .suspected)
+        #expect(prediction.confirmedAt == nil)
+
+        engine.onWindow(watchWindow(id: 2, startOffset: 150, endOffset: 210))
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.confirmedAt == start.addingTimeInterval(210))
+
+        let confirmationEvent = try #require(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "confirmedSleep" })
+        #expect(confirmationEvent.payload["confirmType"] == "behavioralFallback")
+        #expect(confirmationEvent.payload["hrMode"] == "noBaselineWeak")
+    }
+
+    @Test("Route E honors an extended behavioral confirmation window above the default")
+    @MainActor
+    func routeERespectsConfiguredExtendedConfirmWindowCount() async throws {
+        var settings = ExperimentSettings.default
+        settings.routeEParameters = RouteEParameters(
+            wristStillThreshold: 0.02,
+            wristStillWindowCount: 1,
+            wristActiveThreshold: 0.1,
+            wristActiveResetWindowCount: 2,
+            hrConfirmSampleCount: 2,
+            hrTrendMinSamples: 3,
+            hrTrendWindowMinutes: 20,
+            hrSlopeThreshold: -0.3,
+            hrTrendWindowCount: 2,
+            interactionQuietThresholdMinutes: 2,
+            candidateWindowCount: 1,
+            confirmWindowCount: 3,
+            extendedConfirmWindowCount: 5,
+            watchFreshnessMinutes: 3,
+            disconnectGraceMinutes: 5
+        )
+
+        let bus = EventBus()
+        let engine = RouteEEngine(settings: settings, eventBus: bus)
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P3,
+            enabledRoutes: RouteId.allCases
+        )
+        engine.start(
+            session: session,
+            priors: RoutePriors(
+                priorLevel: .P3,
+                typicalSleepOnset: nil,
+                weekdayOnset: nil,
+                weekendOnset: nil,
+                typicalLatencyMinutes: nil,
+                preSleepHRBaseline: nil,
+                sleepHRTarget: nil,
+                hrDropThreshold: nil
+            )
+        )
+
+        engine.onWindow(
+            FeatureWindow(
+                windowId: 450,
+                startTime: start,
+                endTime: start.addingTimeInterval(30),
+                duration: 30,
+                source: .iphone,
+                motion: MotionFeatures(accelRMS: 0.005, peakCount: 0, attitudeChangeRate: 0, maxAccel: 0.01, stillRatio: 1, stillDuration: 30),
+                audio: nil,
+                interaction: InteractionFeatures(isLocked: true, timeSinceLastInteraction: 300, screenWakeCount: 0, lastInteractionAt: start.addingTimeInterval(-270)),
+                watch: nil
+            )
+        )
+
+        func watchWindow(id: Int, startOffset: TimeInterval, endOffset: TimeInterval) -> FeatureWindow {
+            FeatureWindow(
+                windowId: id,
+                startTime: start.addingTimeInterval(startOffset),
+                endTime: start.addingTimeInterval(endOffset),
+                duration: endOffset - startOffset,
+                source: .watch,
+                motion: nil,
+                audio: nil,
+                interaction: nil,
+                watch: WatchFeatures(
+                    wristAccelRMS: 0.01,
+                    wristStillDuration: endOffset - startOffset,
+                    heartRate: 61,
+                    heartRateSampleDate: start.addingTimeInterval(endOffset - 5),
+                    heartRateTrend: .stable,
+                    dataQuality: .good,
+                    motionSignalVersion: .dynamicAccelerationV1
+                )
+            )
+        }
+
+        for index in 0..<4 {
+            let window = watchWindow(
+                id: index,
+                startOffset: 30 + Double(index) * 60,
+                endOffset: 90 + Double(index) * 60
+            )
+            engine.onWindow(window)
+        }
+
+        var prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .candidate || prediction.confidence == .suspected)
+        #expect(prediction.confirmedAt == nil)
+
+        engine.onWindow(watchWindow(id: 4, startOffset: 270, endOffset: 330))
+
+        prediction = try #require(engine.currentPrediction())
+        #expect(prediction.confidence == .confirmed)
+        #expect(prediction.confirmedAt == start.addingTimeInterval(330))
+
+        let confirmationEvent = try #require(bus.recentEvents.first { $0.routeId == .E && $0.eventType == "confirmedSleep" })
+        #expect(confirmationEvent.payload["confirmType"] == "behavioralFallback")
+        #expect(confirmationEvent.payload["hrMode"] == "noBaselineWeak")
+    }
+
     @Test("Route E rejects after repeated watch-motion misses during candidate")
     @MainActor
     func routeERejectsRepeatedWatchMotionMisses() async throws {
@@ -4157,6 +4412,114 @@ struct SleepDetectionPOCTests {
         #expect(diagnostics.alerts.contains(where: { $0.contains("Audio runtime reported an error") }))
     }
 
+    @Test("Session bundle recovers unified outcome from event log when unified artifacts are empty")
+    func sessionBundleRecoversUnifiedOutcomeFromEvents() throws {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let events = [
+            RouteEvent(
+                timestamp: start.addingTimeInterval(90),
+                routeId: .A,
+                eventType: "unified.candidateEntered",
+                payload: [
+                    "time": start.addingTimeInterval(90).csvTimestamp,
+                    "progressScore": "1.950",
+                    "profile": "phoneInteraction+phoneMotion+watchHeartRate+watchMotion"
+                ]
+            ),
+            RouteEvent(
+                timestamp: start.addingTimeInterval(120),
+                routeId: .A,
+                eventType: "unified.confirmedSleep",
+                payload: [
+                    "episodeStartAt": start.addingTimeInterval(30).csvTimestamp,
+                    "candidateAt": start.addingTimeInterval(90).csvTimestamp,
+                    "confirmedAt": start.addingTimeInterval(120).csvTimestamp,
+                    "profile": "phoneInteraction+phoneMotion+watchHeartRate+watchMotion",
+                    "progressScore": "3.000"
+                ]
+            )
+        ]
+        let bundle = SessionBundle(
+            session: session,
+            windows: [],
+            events: events,
+            predictions: [],
+            truth: nil,
+            timeline: nil,
+            unifiedArtifacts: UnifiedSessionArtifacts(decision: nil, timeline: nil, diagnostics: nil)
+        )
+
+        let decision = try #require(bundle.unifiedDecision)
+        #expect(decision.state == .confirmed)
+        #expect(decision.confirmedAt == start.addingTimeInterval(120))
+
+        let diagnostics = SessionDiagnosticsSummary(bundle: bundle)
+        #expect(diagnostics.unifiedStatus?.state == .confirmed)
+
+        let exportPayload = SessionExportPayload(bundle: bundle)
+        #expect(exportPayload.unifiedArtifacts?.decision?.state == .confirmed)
+    }
+
+    @Test("Session bundle does not recover a unified candidate after rollback")
+    func sessionBundleDoesNotRecoverRolledBackUnifiedCandidate() throws {
+        let start = Date(timeIntervalSince1970: 1_712_665_200)
+        let session = Session.make(
+            startTime: start,
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        let events = [
+            RouteEvent(
+                timestamp: start.addingTimeInterval(90),
+                routeId: .A,
+                eventType: "unified.candidateEntered",
+                payload: [
+                    "time": start.addingTimeInterval(90).csvTimestamp,
+                    "progressScore": "1.950",
+                    "profile": "phoneInteraction+phoneMotion+watchHeartRate+watchMotion"
+                ]
+            ),
+            RouteEvent(
+                timestamp: start.addingTimeInterval(120),
+                routeId: .A,
+                eventType: "unified.candidateRolledBack",
+                payload: [
+                    "time": start.addingTimeInterval(120).csvTimestamp,
+                    "reason": "phoneInteractionActive"
+                ]
+            ),
+            RouteEvent(
+                timestamp: start.addingTimeInterval(120),
+                routeId: .A,
+                eventType: "system.unifiedDecisionSnapshot",
+                payload: [
+                    "summary": "state=monitoring; profile=phoneInteraction+phoneMotion+watchHeartRate+watchMotion; progress=0.00; candidate=nil; confirmed=nil"
+                ]
+            )
+        ]
+        let bundle = SessionBundle(
+            session: session,
+            windows: [],
+            events: events,
+            predictions: [],
+            truth: nil,
+            timeline: nil,
+            unifiedArtifacts: UnifiedSessionArtifacts(decision: nil, timeline: nil, diagnostics: nil)
+        )
+
+        let decision = try #require(bundle.unifiedDecision)
+        #expect(decision.state == .monitoring)
+        #expect(decision.candidateAt == nil)
+        #expect(bundle.unifiedTimeline?.latestState == .monitoring)
+    }
+
     @Test("Repository recovers interrupted sessions and ignores bad JSONL tails")
     func repositoryRecovery() async throws {
         let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -4197,6 +4560,47 @@ struct SleepDetectionPOCTests {
 
         let windows = try await repository.loadWindows(sessionId: session.sessionId)
         #expect(windows.count == 1)
+    }
+
+    @Test("Repository preserves existing unified artifacts when asked to save an empty artifact")
+    func repositorySkipsEmptyUnifiedArtifactOverwrite() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        let session = Session.make(
+            startTime: Date(timeIntervalSince1970: 1_712_665_200),
+            deviceCondition: DeviceCondition(hasWatch: true, watchReachable: true, hasHealthKitAccess: true, hasMicrophoneAccess: false, hasMotionAccess: true),
+            priorLevel: .P1,
+            enabledRoutes: RouteId.allCases
+        )
+        try await repository.createSession(session)
+
+        let persisted = UnifiedSessionArtifacts(
+            decision: UnifiedSleepDecision(
+                state: .confirmed,
+                capabilityProfile: UnifiedCapabilityProfile(channels: [.phoneMotion, .phoneInteraction]),
+                episodeStartAt: session.startTime.addingTimeInterval(30),
+                candidateAt: session.startTime.addingTimeInterval(60),
+                confirmedAt: session.startTime.addingTimeInterval(120),
+                progressScore: 3.0,
+                candidateThreshold: 1.5,
+                confirmThreshold: 3.0,
+                evidenceSummary: "Persisted unified confirmation",
+                denialSummary: nil,
+                isFinal: true,
+                lastUpdated: session.startTime.addingTimeInterval(120)
+            ),
+            timeline: nil,
+            diagnostics: nil
+        )
+
+        try await repository.saveUnifiedArtifacts(persisted, for: session.sessionId)
+        try await repository.saveUnifiedArtifacts(
+            UnifiedSessionArtifacts(decision: nil, timeline: nil, diagnostics: nil),
+            for: session.sessionId
+        )
+
+        let loaded = try await repository.loadBundle(sessionId: session.sessionId)
+        #expect(loaded?.unifiedArtifacts?.decision?.state == .confirmed)
     }
 
     @Test("Repository persists timelines alongside bundles")
@@ -4446,6 +4850,129 @@ struct SleepDetectionPOCTests {
         let csv = try String(contentsOf: url)
         #expect(csv.contains("healthkit_truth_resolution"))
         #expect(csv.contains("noQualifyingSleep"))
+    }
+
+    @Test("Raw sleep export includes every sleepAnalysis sample overlapping the selected local day")
+    func rawSleepExportIncludesOverlappingSamples() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        let day = try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 22, hour: 12)))
+        let overlapFromPreviousDay = RawSleepAnalysisSample(
+            uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000002") ?? UUID(),
+            startDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 21, hour: 23, minute: 50))),
+            endDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 22, hour: 0, minute: 10))),
+            valueRaw: 0,
+            valueLabel: "inBed",
+            sourceBundle: "com.apple.health",
+            sourceName: "Health",
+            productType: "iPhone",
+            isUserEntered: false,
+            metadata: ["HKMetadataKeyTimeZone": "Asia/Shanghai"]
+        )
+        let middleOfDay = RawSleepAnalysisSample(
+            uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000001") ?? UUID(),
+            startDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 22, hour: 1, minute: 37))),
+            endDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 22, hour: 2, minute: 33, second: 58))),
+            valueRaw: 3,
+            valueLabel: "asleepCore",
+            sourceBundle: "com.apple.health.sleep",
+            sourceName: "Apple Watch",
+            productType: "Watch",
+            isUserEntered: false,
+            metadata: ["quality": "debug"]
+        )
+        let overlapIntoNextDay = RawSleepAnalysisSample(
+            uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000003") ?? UUID(),
+            startDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 22, hour: 23, minute: 55))),
+            endDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 23, hour: 0, minute: 30))),
+            valueRaw: 5,
+            valueLabel: "asleepREM",
+            sourceBundle: "third.party.sleep",
+            sourceName: "Third Party",
+            productType: nil,
+            isUserEntered: true,
+            metadata: [:]
+        )
+        let outsideDay = RawSleepAnalysisSample(
+            uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000004") ?? UUID(),
+            startDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 21, hour: 21))),
+            endDate: try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 21, hour: 22))),
+            valueRaw: 1,
+            valueLabel: "awake",
+            sourceBundle: "ignored",
+            sourceName: "Ignored",
+            productType: nil,
+            isUserEntered: false,
+            metadata: [:]
+        )
+        let rawSleepProvider = StubRawSleepAnalysisProvider(
+            samples: [overlapIntoNextDay, outsideDay, middleOfDay, overlapFromPreviousDay]
+        )
+        let exportService = LiveExportService(
+            repository: repository,
+            rawSleepProvider: rawSleepProvider,
+            calendar: calendar
+        )
+
+        let url = try await exportService.exportRawSleepJSON(for: day)
+        let payload = try JSONDecoder.iso8601.decode(
+            RawSleepAnalysisExportPayload.self,
+            from: Data(contentsOf: url)
+        )
+
+        #expect(payload.selectedLocalDate == "2026-04-22")
+        #expect(payload.timeZone == calendar.timeZone.identifier)
+        #expect(payload.sampleCount == 3)
+        #expect(payload.samples.map(\.uuid) == [
+            overlapFromPreviousDay.uuid,
+            middleOfDay.uuid,
+            overlapIntoNextDay.uuid
+        ])
+        #expect(payload.samples.map(\.valueLabel) == ["inBed", "asleepCore", "asleepREM"])
+        #expect(payload.samples[1].metadata["quality"] == "debug")
+
+        let requestedInterval = try #require(await rawSleepProvider.lastRequestedInterval())
+        #expect(requestedInterval.start == calendar.startOfDay(for: day))
+        #expect(requestedInterval.end == calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: day)))
+    }
+
+    @Test("Raw sleep export writes an empty payload when no samples overlap the selected day")
+    func rawSleepExportHandlesEmptyResults() async throws {
+        let temporaryURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let repository = FileSessionRepository(baseURL: temporaryURL)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60) ?? .current
+        let day = try #require(calendar.date(from: DateComponents(year: 2026, month: 4, day: 22, hour: 8)))
+        let exportService = LiveExportService(
+            repository: repository,
+            rawSleepProvider: StubRawSleepAnalysisProvider(samples: []),
+            calendar: calendar
+        )
+
+        let url = try await exportService.exportRawSleepJSON(for: day)
+        let payload = try JSONDecoder.iso8601.decode(
+            RawSleepAnalysisExportPayload.self,
+            from: Data(contentsOf: url)
+        )
+
+        #expect(payload.selectedLocalDate == "2026-04-22")
+        #expect(payload.sampleCount == 0)
+        #expect(payload.samples.isEmpty)
+    }
+
+    @Test("HealthKit raw sleep value labels cover known and unknown categories")
+    func healthKitSleepValueLabels() {
+        #if canImport(HealthKit)
+        #expect(LiveHealthKitService.sleepValueLabel(for: HKCategoryValueSleepAnalysis.inBed.rawValue) == "inBed")
+        #expect(LiveHealthKitService.sleepValueLabel(for: HKCategoryValueSleepAnalysis.awake.rawValue) == "awake")
+        #expect(LiveHealthKitService.sleepValueLabel(for: HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue) == "asleepUnspecified")
+        #expect(LiveHealthKitService.sleepValueLabel(for: HKCategoryValueSleepAnalysis.asleepCore.rawValue) == "asleepCore")
+        #expect(LiveHealthKitService.sleepValueLabel(for: HKCategoryValueSleepAnalysis.asleepDeep.rawValue) == "asleepDeep")
+        #expect(LiveHealthKitService.sleepValueLabel(for: HKCategoryValueSleepAnalysis.asleepREM.rawValue) == "asleepREM")
+        #expect(LiveHealthKitService.sleepValueLabel(for: -999) == "unknown(-999)")
+        #endif
     }
 
     @Test("Route F confirms from passive HealthKit HR and HRV samples")
@@ -4953,6 +5480,26 @@ private actor StubSleepHistoryProvider: SleepHistoryProvider {
 
     func fetchRecentSleepSamples(days: Int) async -> [SleepSample] {
         samples
+    }
+}
+
+private actor StubRawSleepAnalysisProvider: RawSleepAnalysisProvider {
+    private let samples: [RawSleepAnalysisSample]
+    private var requestedIntervals: [DateInterval] = []
+
+    init(samples: [RawSleepAnalysisSample]) {
+        self.samples = samples
+    }
+
+    func fetchRawSleepAnalysisSamples(overlapping interval: DateInterval) async -> [RawSleepAnalysisSample] {
+        requestedIntervals.append(interval)
+        return samples.filter { sample in
+            sample.endDate > interval.start && sample.startDate < interval.end
+        }
+    }
+
+    func lastRequestedInterval() -> DateInterval? {
+        requestedIntervals.last
     }
 }
 

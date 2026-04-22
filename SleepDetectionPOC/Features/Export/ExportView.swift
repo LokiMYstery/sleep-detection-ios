@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ExportView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var rawSleepExportDate = Date()
 
     var body: some View {
         List {
@@ -40,6 +41,22 @@ struct ExportView: View {
                 if let selectedSessionExportURL = model.selectedSessionExportURL {
                     ShareLink(item: selectedSessionExportURL) {
                         Label("Share latest session JSON", systemImage: "square.and.arrow.up")
+                    }
+                }
+            }
+
+            Section("Raw HealthKit Sleep") {
+                DatePicker(
+                    "Date",
+                    selection: $rawSleepExportDate,
+                    displayedComponents: .date
+                )
+                Button("Generate raw sleep JSON") {
+                    Task { await model.exportRawSleep(for: rawSleepExportDate) }
+                }
+                if let rawSleepExportURL = model.rawSleepExportURL {
+                    ShareLink(item: rawSleepExportURL) {
+                        Label("Share raw sleep JSON", systemImage: "bed.double")
                     }
                 }
             }

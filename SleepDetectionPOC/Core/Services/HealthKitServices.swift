@@ -30,6 +30,82 @@ enum SleepSampleState: String, Codable, Equatable, Sendable {
     case awake
 }
 
+struct RawSleepAnalysisSample: Equatable, Sendable {
+    var uuid: UUID
+    var startDate: Date
+    var endDate: Date
+    var valueRaw: Int
+    var valueLabel: String
+    var sourceBundle: String?
+    var sourceName: String?
+    var productType: String?
+    var isUserEntered: Bool
+    var metadata: [String: String]
+}
+
+struct RawSleepAnalysisRecord: Codable, Equatable, Sendable {
+    var uuid: UUID
+    var startDate: Date
+    var endDate: Date
+    var valueRaw: Int
+    var valueLabel: String
+    var sourceBundle: String?
+    var sourceName: String?
+    var productType: String?
+    var isUserEntered: Bool
+    var metadata: [String: String]
+
+    init(sample: RawSleepAnalysisSample) {
+        self.uuid = sample.uuid
+        self.startDate = sample.startDate
+        self.endDate = sample.endDate
+        self.valueRaw = sample.valueRaw
+        self.valueLabel = sample.valueLabel
+        self.sourceBundle = sample.sourceBundle
+        self.sourceName = sample.sourceName
+        self.productType = sample.productType
+        self.isUserEntered = sample.isUserEntered
+        self.metadata = sample.metadata
+    }
+}
+
+struct RawSleepAnalysisExportPayload: Codable, Equatable, Sendable {
+    var selectedLocalDate: String
+    var timeZone: String
+    var queryWindowStart: Date
+    var queryWindowEnd: Date
+    var exportedAt: Date
+    var sampleCount: Int
+    var samples: [RawSleepAnalysisRecord]
+
+    init(
+        selectedLocalDate: String,
+        timeZone: String,
+        queryWindow: DateInterval,
+        exportedAt: Date,
+        samples: [RawSleepAnalysisSample]
+    ) {
+        let sortedSamples = samples.sorted(by: Self.sort(lhs:rhs:))
+        self.selectedLocalDate = selectedLocalDate
+        self.timeZone = timeZone
+        self.queryWindowStart = queryWindow.start
+        self.queryWindowEnd = queryWindow.end
+        self.exportedAt = exportedAt
+        self.sampleCount = sortedSamples.count
+        self.samples = sortedSamples.map(RawSleepAnalysisRecord.init(sample:))
+    }
+
+    private static func sort(lhs: RawSleepAnalysisSample, rhs: RawSleepAnalysisSample) -> Bool {
+        if lhs.startDate != rhs.startDate {
+            return lhs.startDate < rhs.startDate
+        }
+        if lhs.endDate != rhs.endDate {
+            return lhs.endDate < rhs.endDate
+        }
+        return lhs.uuid.uuidString < rhs.uuid.uuidString
+    }
+}
+
 struct CanonicalSleepInterval: Equatable, Sendable {
     var startDate: Date
     var endDate: Date
@@ -502,54 +578,79 @@ enum TruthEvaluator {
     static let minimumQualifyingSleepDuration: TimeInterval = 15 * 60
     static let gracePeriod: TimeInterval = 48 * 60 * 60
 
+    struct SelectedTruth: Equatable, Sendable {
+        var sample: SleepSample
+        var diagnostics: TruthSelectionDiagnostics
+    }
+
     enum ResolutionDecision: Equatable, Sendable {
         case pending
-        case resolvedOnset(SleepSample)
+        case resolvedOnset(SelectedTruth)
         case noQualifyingSleep
     }
 
     static func selectTruth(
         for session: Session,
-        from sleepSamples: [SleepSample]
+        from sleepSamples: [SleepSample],
+        nextSessionStart: Date? = nil
     ) -> SleepSample? {
-        let relevantSamples = truthRelevantSamples(for: session, from: sleepSamples)
+        selectTruthDetails(for: session, from: sleepSamples, nextSessionStart: nextSessionStart)?.sample
+    }
+
+    static func selectTruthDetails(
+        for session: Session,
+        from sleepSamples: [SleepSample],
+        nextSessionStart: Date? = nil
+    ) -> SelectedTruth? {
+        let windowEnd = truthWindowEnd(for: session, nextSessionStart: nextSessionStart)
+        let relevantSamples = truthRelevantSamples(
+            for: session,
+            from: sleepSamples,
+            selectionWindowEnd: windowEnd
+        )
         let canonicalTimeline = HealthKitSleepCanonicalizer.canonicalize(relevantSamples)
 
-        let candidateInterval: CanonicalSleepInterval?
-        if let alignedAwake = canonicalTimeline.first(where: { interval in
-            interval.state == .awake && interval.endDate > session.startTime
-        }) {
-            candidateInterval = canonicalTimeline.first(where: { interval in
-                interval.state == .asleep &&
-                interval.startDate >= alignedAwake.endDate &&
-                interval.duration >= minimumQualifyingSleepDuration
-            })
-        } else {
-            candidateInterval = canonicalTimeline.first(where: { interval in
-                interval.state == .asleep &&
-                interval.startDate >= session.startTime &&
-                interval.duration >= minimumQualifyingSleepDuration
-            })
-        }
-
+        let candidateInterval = canonicalTimeline.first(where: { interval in
+            interval.state == .asleep &&
+            interval.startDate >= session.startTime &&
+            interval.startDate < windowEnd &&
+            interval.duration >= minimumQualifyingSleepDuration
+        })
         guard let candidateInterval else { return nil }
-        return SleepSample(
+
+        let sample = SleepSample(
             startDate: candidateInterval.startDate,
             endDate: candidateInterval.endDate,
             sourceBundle: candidateInterval.representativeSourceBundle,
             isUserEntered: false,
             state: .asleep
         )
+        return SelectedTruth(
+            sample: sample,
+            diagnostics: TruthSelectionDiagnostics(
+                selectorVersion: "session-first-onset-v1",
+                selectionWindowStart: session.startTime,
+                selectionWindowEnd: windowEnd,
+                nextSessionStart: nextSessionStart,
+                matchedIntervalStart: candidateInterval.startDate,
+                matchedIntervalEnd: candidateInterval.endDate
+            )
+        )
     }
 
     static func resolveTruth(
         for session: Session,
         from sleepSamples: [SleepSample],
+        nextSessionStart: Date? = nil,
         now: Date,
         gracePeriod: TimeInterval = TruthEvaluator.gracePeriod
     ) -> ResolutionDecision {
-        if let truthSample = selectTruth(for: session, from: sleepSamples) {
-            return .resolvedOnset(truthSample)
+        if let selectedTruth = selectTruthDetails(
+            for: session,
+            from: sleepSamples,
+            nextSessionStart: nextSessionStart
+        ) {
+            return .resolvedOnset(selectedTruth)
         }
 
         let terminalReferenceTime = session.interruptedAt ?? session.endTime ?? session.startTime
@@ -582,13 +683,20 @@ enum TruthEvaluator {
 
     private static func truthRelevantSamples(
         for session: Session,
-        from sleepSamples: [SleepSample]
+        from sleepSamples: [SleepSample],
+        selectionWindowEnd: Date
     ) -> [SleepSample] {
-        let start = session.startTime.addingTimeInterval(-2 * 3600)
-        let end = session.startTime.addingTimeInterval(12 * 3600)
         return sleepSamples.filter { sample in
-            sample.endDate > start && sample.startDate < end
+            sample.endDate > session.startTime && sample.startDate < selectionWindowEnd
         }
+    }
+
+    private static func truthWindowEnd(for session: Session, nextSessionStart: Date?) -> Date {
+        let defaultEnd = session.startTime.addingTimeInterval(12 * 3600)
+        guard let nextSessionStart, nextSessionStart > session.startTime else {
+            return defaultEnd
+        }
+        return min(defaultEnd, nextSessionStart)
     }
 }
 
@@ -601,6 +709,7 @@ protocol ExportService: Sendable {
     func exportSummaryCSV() async throws -> URL
     func exportEvaluationJSON() async throws -> URL
     func exportSessionJSON(sessionId: UUID) async throws -> URL
+    func exportRawSleepJSON(for day: Date) async throws -> URL
 }
 
 actor LiveHealthKitService {
@@ -725,6 +834,60 @@ actor LiveHealthKitService {
         #endif
     }
 
+    func fetchRawSleepAnalysisSamples(overlapping interval: DateInterval) async -> [RawSleepAnalysisSample] {
+        #if targetEnvironment(simulator)
+        return []
+        #else
+        #if canImport(HealthKit)
+        guard
+            HKHealthStore.isHealthDataAvailable(),
+            let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)
+        else {
+            return []
+        }
+
+        let predicate = HKQuery.predicateForSamples(
+            withStart: interval.start,
+            end: interval.end,
+            options: []
+        )
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+
+        return await withCheckedContinuation { continuation in
+            let query = HKSampleQuery(
+                sampleType: sleepType,
+                predicate: predicate,
+                limit: HKObjectQueryNoLimit,
+                sortDescriptors: [sortDescriptor]
+            ) { _, samples, _ in
+                let mapped = (samples as? [HKCategorySample] ?? [])
+                    .filter { sample in
+                        sample.endDate > interval.start && sample.startDate < interval.end
+                    }
+                    .map { sample in
+                        RawSleepAnalysisSample(
+                            uuid: sample.uuid,
+                            startDate: sample.startDate,
+                            endDate: sample.endDate,
+                            valueRaw: sample.value,
+                            valueLabel: Self.sleepValueLabel(for: sample.value),
+                            sourceBundle: sample.sourceRevision.source.bundleIdentifier,
+                            sourceName: sample.sourceRevision.source.name,
+                            productType: sample.sourceRevision.productType,
+                            isUserEntered: (sample.metadata?[HKMetadataKeyWasUserEntered] as? Bool) ?? false,
+                            metadata: Self.serializeMetadata(sample.metadata)
+                        )
+                    }
+                continuation.resume(returning: mapped)
+            }
+            healthStore.execute(query)
+        }
+        #else
+        return []
+        #endif
+        #endif
+    }
+
     func fetchRecentHeartRateSamples(days: Int = 14) async -> [HeartRateSample] {
         #if targetEnvironment(simulator)
         return []
@@ -824,6 +987,25 @@ actor LiveHealthKitService {
     }
 
     #if canImport(HealthKit)
+    static func sleepValueLabel(for value: Int) -> String {
+        switch value {
+        case HKCategoryValueSleepAnalysis.inBed.rawValue:
+            return "inBed"
+        case HKCategoryValueSleepAnalysis.awake.rawValue:
+            return "awake"
+        case HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue:
+            return "asleepUnspecified"
+        case HKCategoryValueSleepAnalysis.asleepCore.rawValue:
+            return "asleepCore"
+        case HKCategoryValueSleepAnalysis.asleepDeep.rawValue:
+            return "asleepDeep"
+        case HKCategoryValueSleepAnalysis.asleepREM.rawValue:
+            return "asleepREM"
+        default:
+            return "unknown(\(value))"
+        }
+    }
+
     private static func isAsleepValue(_ value: Int) -> Bool {
         value == HKCategoryValueSleepAnalysis.asleepUnspecified.rawValue ||
         value == HKCategoryValueSleepAnalysis.asleepCore.rawValue ||
@@ -840,6 +1022,33 @@ actor LiveHealthKitService {
         }
         return nil
     }
+
+    private static func serializeMetadata(_ metadata: [String: Any]?) -> [String: String] {
+        guard let metadata else { return [:] }
+        return metadata.reduce(into: [String: String]()) { partialResult, item in
+            partialResult[item.key] = serializeMetadataValue(item.value)
+        }
+    }
+
+    private static func serializeMetadataValue(_ value: Any) -> String {
+        switch value {
+        case let string as String:
+            return string
+        case let number as NSNumber:
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue.description
+            }
+            return number.stringValue
+        case let date as Date:
+            return date.csvTimestamp
+        case let url as URL:
+            return url.absoluteString
+        case let uuid as UUID:
+            return uuid.uuidString
+        default:
+            return String(describing: value)
+        }
+    }
     #endif
 }
 
@@ -847,7 +1056,11 @@ protocol SleepHistoryProvider: Sendable {
     func fetchRecentSleepSamples(days: Int) async -> [SleepSample]
 }
 
-extension LiveHealthKitService: SleepHistoryProvider {}
+protocol RawSleepAnalysisProvider: Sendable {
+    func fetchRawSleepAnalysisSamples(overlapping interval: DateInterval) async -> [RawSleepAnalysisSample]
+}
+
+extension LiveHealthKitService: SleepHistoryProvider, RawSleepAnalysisProvider {}
 
 actor LiveTruthRefillService: TruthRefillService {
     private let sleepHistoryProvider: any SleepHistoryProvider
@@ -875,9 +1088,19 @@ actor LiveTruthRefillService: TruthRefillService {
         let bundles = try await repository.loadBundles()
         let samples = await sleepHistoryProvider.fetchRecentSleepSamples(days: 3)
         let now = Date()
+        let bundlesAscending = bundles.sorted { $0.session.startTime < $1.session.startTime }
 
-        for bundle in bundles where shouldProcessTruth(for: bundle, reprocessResolvedNoQualifying: reprocessResolvedNoQualifying) {
-            switch TruthEvaluator.resolveTruth(for: bundle.session, from: samples, now: now) {
+        for (index, bundle) in bundlesAscending.enumerated()
+        where shouldProcessTruth(for: bundle, reprocessResolvedNoQualifying: reprocessResolvedNoQualifying) {
+            let nextSessionStart = bundlesAscending.indices.contains(index + 1)
+                ? bundlesAscending[index + 1].session.startTime
+                : nil
+            switch TruthEvaluator.resolveTruth(
+                for: bundle.session,
+                from: samples,
+                nextSessionStart: nextSessionStart,
+                now: now
+            ) {
             case .pending:
                 if bundle.session.status == .interrupted {
                     var updatedSession = bundle.session
@@ -885,17 +1108,18 @@ actor LiveTruthRefillService: TruthRefillService {
                     try await repository.updateSession(updatedSession)
                 }
                 continue
-            case .resolvedOnset(let truthSample):
+            case .resolvedOnset(let selectedTruth):
                 let truth = TruthRecord(
                     resolution: .resolvedOnset,
-                    healthKitSleepOnset: truthSample.startDate,
-                    healthKitSource: truthSample.sourceBundle,
+                    healthKitSleepOnset: selectedTruth.sample.startDate,
+                    healthKitSource: selectedTruth.sample.sourceBundle,
                     retrievedAt: now,
                     errors: TruthEvaluator.computeErrors(
-                        truthDate: truthSample.startDate,
+                        truthDate: selectedTruth.sample.startDate,
                         predictions: bundle.referencePredictions,
                         unifiedDecision: bundle.unifiedDecision
-                    )
+                    ),
+                    selectionDiagnostics: selectedTruth.diagnostics
                 )
 
                 var updatedSession = bundle.session
@@ -932,9 +1156,17 @@ actor LiveTruthRefillService: TruthRefillService {
 
 actor LiveExportService: ExportService {
     private let repository: SessionRepository
+    private let rawSleepProvider: any RawSleepAnalysisProvider
+    private let calendar: Calendar
 
-    init(repository: SessionRepository) {
+    init(
+        repository: SessionRepository,
+        rawSleepProvider: any RawSleepAnalysisProvider = LiveHealthKitService(),
+        calendar: Calendar = .current
+    ) {
         self.repository = repository
+        self.rawSleepProvider = rawSleepProvider
+        self.calendar = calendar
     }
 
     func exportSummaryCSV() async throws -> URL {
@@ -1029,5 +1261,40 @@ actor LiveExportService: ExportService {
             .appendingPathComponent("SleepPOC-\(sessionId.uuidString).json")
         try payload.write(to: url, options: .atomic)
         return url
+    }
+
+    func exportRawSleepJSON(for day: Date) async throws -> URL {
+        let queryWindow = Self.localDayInterval(containing: day, calendar: calendar)
+        let samples = await rawSleepProvider.fetchRawSleepAnalysisSamples(overlapping: queryWindow)
+        let overlappingSamples = samples.filter { sample in
+            sample.endDate > queryWindow.start && sample.startDate < queryWindow.end
+        }
+        let selectedLocalDate = Self.localDateString(for: day, calendar: calendar)
+        let payload = RawSleepAnalysisExportPayload(
+            selectedLocalDate: selectedLocalDate,
+            timeZone: calendar.timeZone.identifier,
+            queryWindow: queryWindow,
+            exportedAt: Date(),
+            samples: overlappingSamples
+        )
+        let data = try JSONEncoder.pretty.encode(payload)
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("SleepPOC-healthkit-sleep-\(selectedLocalDate).json")
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+
+    private static func localDayInterval(containing day: Date, calendar: Calendar) -> DateInterval {
+        let start = calendar.startOfDay(for: day)
+        let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(24 * 60 * 60)
+        return DateInterval(start: start, end: end)
+    }
+
+    private static func localDateString(for day: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: day)
+        let year = components.year ?? 0
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 }

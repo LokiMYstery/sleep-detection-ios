@@ -1457,6 +1457,8 @@ final class RouteEEngine: RouteEngine {
         var confirmedAt: Date?
         var watchMotionMet: Bool
         var heartRateMet: Bool
+        var weakHeartRateMet: Bool
+        var heartRateMode: String
         var interactionMet: Bool
         var confirmType: String?
         var currentHeartRate: Double?
@@ -1585,6 +1587,8 @@ final class RouteEEngine: RouteEngine {
         var hasLegacyWatchMotionSignal = false
         var finalWatchMotionMet = false
         var finalHeartRateMet = false
+        var finalWeakHeartRateMet = false
+        var finalHeartRateMode = "pending"
         var finalInteractionMet = false
         var confirmType: String?
         var currentHeartRate: Double?
@@ -1600,6 +1604,7 @@ final class RouteEEngine: RouteEngine {
         var behavioralConfirmCountedWatchWindowIds: Set<Int> = []
         let sleepTarget = resolvedSleepTarget(from: priors)
         let hrDropThreshold = resolvedHRDropThreshold(from: priors)
+        let hasExplicitHeartRatePrior = priors.preSleepHRBaseline != nil || priors.sleepHRTarget != nil
 
         for window in timeline {
             if let interaction = window.interaction {
@@ -1664,6 +1669,8 @@ final class RouteEEngine: RouteEngine {
             guard let matchedWatch else {
                 finalWatchMotionMet = false
                 finalHeartRateMet = false
+                finalWeakHeartRateMet = false
+                finalHeartRateMode = "pending"
                 finalInteractionMet = interactionSatisfied(
                     at: window.endTime,
                     interaction: latestInteraction,
@@ -1777,10 +1784,11 @@ final class RouteEEngine: RouteEngine {
             let heartRateMet =
                 hrTargetStreak >= parameters.hrConfirmSampleCount ||
                 (heartRateTrendMet && hrTrendStreak >= parameters.hrTrendWindowCount)
-            let softHeartRateMet = isSoftHeartRateQualified(
+            let weakHeartRateMet = isWeakHeartRateQualified(
                 trend: heartRateTrend,
                 heartRate: watch.heartRate,
-                sleepTarget: sleepTarget
+                sleepTarget: sleepTarget,
+                hasExplicitPrior: hasExplicitHeartRatePrior
             )
             let interactionMet = interactionSatisfied(
                 at: window.endTime,
@@ -1791,6 +1799,12 @@ final class RouteEEngine: RouteEngine {
 
             finalWatchMotionMet = watchMotionMet
             finalHeartRateMet = heartRateMet
+            finalWeakHeartRateMet = weakHeartRateMet
+            finalHeartRateMode = heartRateMode(
+                strongHeartRateMet: heartRateMet,
+                weakHeartRateMet: weakHeartRateMet,
+                hasExplicitPrior: hasExplicitHeartRatePrior
+            )
             finalInteractionMet = interactionMet
             currentHeartRate = watch.heartRate
             currentHeartRateSampleDate = watch.heartRateSampleDate ?? matchedWatch.endTime
@@ -1863,7 +1877,7 @@ final class RouteEEngine: RouteEngine {
                 ((watchMotionMet || heartRateMet) && interactionMet)
             let fullyConfirmed = watchMotionMet && heartRateMet && interactionMet
             let watchDoubleConfirmed = watchMotionMet && heartRateMet
-            let behavioralConfirmed = watchMotionMet && interactionMet && softHeartRateMet
+            let behavioralConfirmed = watchMotionMet && interactionMet && weakHeartRateMet
 
             if candidateMet {
                 candidateFailureStreak = 0
@@ -1990,7 +2004,7 @@ final class RouteEEngine: RouteEngine {
                 predictedSleepOnset: predictedTime,
                 candidateAt: candidateAt,
                 confidence: confidence,
-                evidenceSummary: "Watch fusion candidate. Wrist \(finalWatchMotionMet ? "met" : "pending"), HR \(finalHeartRateMet ? "met" : "pending"), iPhone \(finalInteractionMet ? "met" : "pending")",
+                evidenceSummary: "Watch fusion candidate. Wrist \(finalWatchMotionMet ? "met" : "pending"), HR \(finalHeartRateMode), iPhone \(finalInteractionMet ? "met" : "pending")",
                 lastUpdated: timeline.last?.endTime ?? session.startTime,
                 isAvailable: true
             )
@@ -2038,6 +2052,8 @@ final class RouteEEngine: RouteEngine {
             confirmedAt: confirmedAt,
             watchMotionMet: finalWatchMotionMet,
             heartRateMet: finalHeartRateMet,
+            weakHeartRateMet: finalWeakHeartRateMet,
+            heartRateMode: finalHeartRateMode,
             interactionMet: finalInteractionMet,
             confirmType: confirmType,
             currentHeartRate: currentHeartRate,
@@ -2089,6 +2105,7 @@ final class RouteEEngine: RouteEngine {
                         "candidateAt": result.candidateAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "wristMotionMet": String(result.watchMotionMet),
                         "heartRateMet": String(result.heartRateMet),
+                        "heartRateMode": result.heartRateMode,
                         "interactionMet": String(result.interactionMet)
                     ]
                 )
@@ -2108,7 +2125,8 @@ final class RouteEEngine: RouteEngine {
                         "confirmedAt": result.confirmedAt.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
                         "method": "watchFusion",
                         "confirmType": result.confirmType ?? "unknown",
-                        "heartRateAtConfirm": result.currentHeartRate?.formatted3 ?? "nil"
+                        "heartRateAtConfirm": result.currentHeartRate?.formatted3 ?? "nil",
+                        "hrMode": result.heartRateMode
                     ]
                 )
             )
@@ -2150,6 +2168,7 @@ final class RouteEEngine: RouteEngine {
                         "channelStatus": channelSummary(from: result),
                         "heartRate": result.currentHeartRate?.formatted3 ?? "nil",
                         "heartRateSampleDate": result.currentHeartRateSampleDate.map { ISO8601DateFormatter.cached.string(from: $0) } ?? "",
+                        "hrMode": result.heartRateMode,
                         "hrTrend": result.heartRateTrend.rawValue
                     ]
                 )
@@ -2195,7 +2214,7 @@ final class RouteEEngine: RouteEngine {
     }
 
     private func channelSummary(from result: EvaluationResult) -> String {
-        "watchMotion=\(result.watchMotionMet), heartRate=\(result.heartRateMet), interaction=\(result.interactionMet), hrTrend=\(result.heartRateTrend.rawValue)"
+        "watchMotion=\(result.watchMotionMet), heartRate=\(result.heartRateMode), interaction=\(result.interactionMet), hrTrend=\(result.heartRateTrend.rawValue)"
     }
 
     private func resolvedSleepTarget(from priors: RoutePriors) -> Double? {
@@ -2302,13 +2321,31 @@ final class RouteEEngine: RouteEngine {
         return baseline - heartRate >= hrDropThreshold * 0.6
     }
 
-    private func isSoftHeartRateQualified(
+    private func isWeakHeartRateQualified(
         trend: WatchFeatures.HRTrend,
         heartRate: Double?,
-        sleepTarget: Double?
+        sleepTarget: Double?,
+        hasExplicitPrior: Bool
     ) -> Bool {
-        guard let heartRate, let sleepTarget, trend != .rising else { return false }
-        return heartRate <= sleepTarget + 1.0
+        guard let heartRate, trend != .rising else { return false }
+        if hasExplicitPrior, let sleepTarget {
+            return heartRate <= sleepTarget + 3.0
+        }
+        return heartRate <= 62.0
+    }
+
+    private func heartRateMode(
+        strongHeartRateMet: Bool,
+        weakHeartRateMet: Bool,
+        hasExplicitPrior: Bool
+    ) -> String {
+        if strongHeartRateMet {
+            return "strong"
+        }
+        if weakHeartRateMet {
+            return hasExplicitPrior ? "weak" : "noBaselineWeak"
+        }
+        return "pending"
     }
 
     private func rejectionChannel(

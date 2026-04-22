@@ -118,6 +118,10 @@ struct UnifiedSessionArtifacts: Codable, Equatable, Sendable {
     var decision: UnifiedSleepDecision?
     var timeline: UnifiedSleepTimeline?
     var diagnostics: UnifiedDecisionDiagnostics?
+
+    var isEmpty: Bool {
+        decision == nil && timeline == nil && diagnostics == nil
+    }
 }
 
 struct UnifiedProfileParameters: Codable, Equatable, Sendable {

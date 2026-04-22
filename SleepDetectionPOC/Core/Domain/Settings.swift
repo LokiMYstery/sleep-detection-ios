@@ -302,7 +302,7 @@ struct RouteEParameters: Codable, Equatable, Sendable {
         iphonePeakCountThreshold: RouteBParameters.default.peakCountThreshold,
         candidateWindowCount: 2,
         confirmWindowCount: 3,
-        extendedConfirmWindowCount: 5,
+        extendedConfirmWindowCount: 3,
         watchFreshnessMinutes: 3,
         disconnectGraceMinutes: 5
     )

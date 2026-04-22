@@ -24,6 +24,7 @@ final class AppModel: ObservableObject {
     @Published var summaryExportURL: URL?
     @Published var evaluationExportURL: URL?
     @Published var selectedSessionExportURL: URL?
+    @Published var rawSleepExportURL: URL?
     @Published var replayStatusMessage: String?
     @Published var lastError: AppError?
     @Published var isStartingSession = false
@@ -105,7 +106,7 @@ final class AppModel: ObservableObject {
         self.settingsStore = settingsStore
         self.healthKitService = healthKitService
         self.truthRefillService = LiveTruthRefillService(healthKitService: healthKitService, repository: repository)
-        self.exportService = LiveExportService(repository: repository)
+        self.exportService = LiveExportService(repository: repository, rawSleepProvider: healthKitService)
         self.routeCMotionPriorProvider = routeCMotionPriorProvider
         self.motionProvider = motionProvider
         self.interactionProvider = interactionProvider
@@ -665,6 +666,10 @@ final class AppModel: ObservableObject {
         selectedSessionExportURL = try? await exportService.exportSessionJSON(sessionId: sessionId)
     }
 
+    func exportRawSleep(for day: Date) async {
+        rawSleepExportURL = try? await exportService.exportRawSleepJSON(for: day)
+    }
+
     func replayRouteC(sessionId: UUID) async {
         await replayRoute(.C, sessionId: sessionId)
     }
@@ -707,7 +712,8 @@ final class AppModel: ObservableObject {
                     truthDate: truthDate,
                     predictions: updatedPredictions,
                     unifiedDecision: bundle.unifiedDecision
-                )
+                ),
+                selectionDiagnostics: bundle.truth?.selectionDiagnostics
             )
             try? await repository.saveTruth(updatedTruth, for: sessionId)
         }

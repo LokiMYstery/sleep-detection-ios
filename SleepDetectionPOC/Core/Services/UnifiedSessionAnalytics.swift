@@ -212,6 +212,6 @@ enum UnifiedSessionAnalytics {
     }
 
     private static func hasUnifiedArtifacts(_ bundle: SessionBundle) -> Bool {
-        bundle.unifiedArtifacts != nil
+        bundle.effectiveUnifiedArtifacts != nil
     }
 }

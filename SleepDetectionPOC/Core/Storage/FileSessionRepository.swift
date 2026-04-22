@@ -72,6 +72,7 @@ actor FileSessionRepository: SessionRepository {
 
     func saveUnifiedArtifacts(_ artifacts: UnifiedSessionArtifacts, for sessionId: UUID) async throws {
         try ensureSessionDirectory(sessionId)
+        guard !artifacts.isEmpty else { return }
         try writeJSON(
             artifacts,
             to: sessionURL(for: sessionId, fileName: "unified.json")
