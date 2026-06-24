@@ -1,4 +1,4 @@
-# SPEC 04: 路线 D - 无 Watch 的 iPhone 多模态融合
+# [旧版] SPEC 04: 路线 D - 无 Watch 的 iPhone 多模态融合
 
 > **状态**：v2 已实现（quiet-fusion-first + 2 窗口回退迟滞），参数待继续调优
 > **前置文档**：SPEC 00 基础框架、SPEC 03 路线 C、《入睡检测 POC 实验路线与验证规划》§4 路线 D

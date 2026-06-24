@@ -1,4 +1,4 @@
-# SPEC 08: Action-Ready 优先的整夜睡眠 Episode 与 Re-Onset 数据结构
+# [旧版] SPEC 08: Action-Ready 优先的整夜睡眠 Episode 与 Re-Onset 数据结构
 
 > **状态**：数据结构 / tracker / 持久化已实现；动作执行集成仍在进行
 > **前置文档**：SPEC 06 评估框架、SPEC 07 路线 F

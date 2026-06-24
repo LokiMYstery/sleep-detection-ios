@@ -1,4 +1,4 @@
-# SPEC 03: 路线 C - 无 Watch 的 iPhone 体动检测
+# [旧版] SPEC 03: 路线 C - 无 Watch 的 iPhone 体动检测
 
 > **状态**：草稿，待评审
 > **前置文档**：SPEC 00 基础框架、SPEC 02 路线 B、《入睡检测 POC 实验路线与验证规划》§4 路线 C
