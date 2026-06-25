@@ -102,7 +102,29 @@ Channel 是统一链路内部使用的一路可用信号:
 
 当前 POC 的 Watch App 前端页面只用于 debug 和授权/状态观察，没有做正式产品设计，不能直接作为成熟 App 的 Watch 端 UI。
 
-## 4. 项目结构
+## 4. 麦克风和音频采集边界
+
+POC 里保留了麦克风音频特征和噪音检测能力，主要用于调试和后续验证。当前统一降级主链路不依赖 `audio` channel，但集成成熟 App 时仍需要理解现有实现，因为它会影响 App 的音频 session。
+
+当前 `LiveAudioProvider` 使用的是全双工语音处理方案:
+
+- Capture backend 是 `VoiceProcessingIO`，同时启用 input 和 output。
+- `AVAudioSession` 使用 `.playAndRecord` category、`.voiceChat` mode，并设置 `.defaultToSpeaker`。
+- iOS 18.2 及以上会尝试 `setPrefersEchoCancelledInput(true)`。
+- output callback 会持续渲染，用于保持音频 I/O 活跃；POC 还提供 bundled playback asset，用来调试“本机播放声音时麦克风特征是否仍可用”。
+
+这意味着当前麦克风噪音检测不是单纯打开麦克风采样，而是依赖“本机输出 + 语音处理/回声消除 + 麦克风输入”的组合路径。它有助于验证播放污染、回声消除和后台音频 I/O 稳定性，但也会和正式 App 的助眠音乐播放产生耦合。
+
+接入成熟 App 时需要单独处理这类兼容性问题:
+
+- 正式播放器已经占用或配置了 `AVAudioSession` 时，不能假设 POC 的 `.playAndRecord` / `.voiceChat` 策略可以直接覆盖。
+- `voiceChat` 和 echo-cancelled input 可能改变播放路由、音质、音量、混音行为或其它后台音频的中断表现。
+- POC bundled playback 只是 debug 验证工具，不等同于正式助眠音乐播放链路。
+- 如果正式产品要同时播放音乐并启用麦克风特征，需要在产品播放器、音频 session 策略、后台能力和麦克风特征质量之间做兼容性验证。
+
+如果成熟 App 暂时不接入音频特征，可以保留统一链路当前的 phone / watch channel 判定，不需要把这套音频采集路径作为主结果前置条件。
+
+## 5. 项目结构
 
 成熟 App 集成时优先看这些文件:
 
@@ -124,7 +146,7 @@ Channel 是统一链路内部使用的一路可用信号:
 - Watch target 需要 HealthKit share/update、Motion usage、`WKBackgroundModes.workout-processing`。
 - Watch target 当前复用 `Models.swift`、`UnifiedModels.swift`、`Settings.swift`。
 
-## 5. 最小接入流程
+## 6. 最小接入流程
 
 成熟 App 可以把 `AppModel` 当参考实现，不需要照搬 POC 的页面、存储和调试结构。
 
@@ -163,7 +185,7 @@ engine.finalize(at: Date())
 8. Session 结束时调用 `finalize(at:)`。
 9. 次日如果有 HealthKit truth，再做离线评估。
 
-## 6. 统一降级链路怎么实现
+## 7. 统一降级链路怎么实现
 
 启动 session 时，engine 会根据设备能力生成 `capabilityProfile`:
 
@@ -201,7 +223,7 @@ static func capabilityProfile(for session: Session) -> UnifiedCapabilityProfile
 
 某一路信号暂时没有数据时，它本轮不加分，但其它可用信号仍然可以继续推进。这样可以覆盖 Watch 不可用、Watch 断连、iPhone motion 不可用等真实设备条件。
 
-## 7. 四路信号规则
+## 8. 四路信号规则
 
 Watch motion:
 
@@ -230,7 +252,7 @@ Phone interaction:
 - 锁屏、无亮屏、安静至少 60 秒给弱正向分。
 - 未锁屏、亮屏、或最近 15 秒内仍有交互会 rollback active episode。
 
-## 8. 产品动作接入
+## 9. 产品动作接入
 
 业务动作只看 unified decision:
 
@@ -261,7 +283,7 @@ stopAudioOnce()
 - 重复 snapshot 不能重复关音频。
 - `noResult` 表示本次 session 没有得到可动作确认。
 
-## 9. 主结果保存
+## 10. 主结果保存
 
 POC 会把主结果保存到 `unified.json`，结构是:
 
@@ -288,7 +310,7 @@ struct UnifiedSessionArtifacts: Codable, Equatable, Sendable {
 
 `diagnostics.evidenceSnapshots` 数据较细，适合调试和灰度排查，不建议默认作为产品主数据全量长期保存。
 
-## 10. 事件
+## 11. 事件
 
 POC 使用 `EventBus` 和 `events.jsonl` 记录运行时事件，主要用于 debug、恢复和测试。成熟 App 不一定需要保存这些事件。
 
@@ -305,7 +327,7 @@ POC 使用 `EventBus` 和 `events.jsonl` 记录运行时事件，主要用于 de
 
 如果成熟 App 已有日志系统，可以只记录关键业务点，例如 session 降级、confirmed、rollback 计数和最终结果。是否落盘事件流由产品排障需求决定。
 
-## 11. UI 边界
+## 12. UI 边界
 
 当前 POC 的 iOS UI 和 Watch UI 都是调试 App UI，不适合作为成熟 App 实装界面。
 
@@ -326,7 +348,7 @@ POC 使用 `EventBus` 和 `events.jsonl` 记录运行时事件，主要用于 de
 
 正式 App 应按自己的睡前流程设计 UI，只把 `UnifiedSleepDecision` 映射为内部状态或轻量提示。
 
-## 12. 离线评估
+## 13. 离线评估
 
 次日 HealthKit truth 回填后，当前口径用 `confirmedAt` 计算误差:
 
@@ -353,10 +375,11 @@ UnifiedSessionAnalytics.exportPayload(from: bundles)
 
 离线评估用于看 confirmed 时间与 HealthKit 入睡时间之间的偏差，并不改变当晚实时动作已经发生的事实。
 
-## 13. 集成注意事项
+## 14. 集成注意事项
 
 - 先把 session、window、decision 三个概念接稳，再考虑完整诊断和评估。
 - Watch 实时通信依赖 Watch App，Watch App 生命周期要作为独立工程问题处理。
+- 麦克风音频特征当前走 `VoiceProcessingIO` 全双工语音处理路径；如果正式 App 同时播放助眠音乐，需要把音频 session、播放路由、混音/中断和特征质量作为兼容性问题验证。
 - `confirmedAt` 是产品动作时间，不要用 `candidateAt` 触发动作。
 - 没有 Watch 时仍可用 phone profile 运行。
 - HealthKit truth 不是 live decision 前置条件。
