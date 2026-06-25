@@ -42,7 +42,7 @@ Session 是所有窗口、判定结果、调试日志和离线评估的归属单
 - `motion`: iPhone 运动特征。
 - `interaction`: 锁屏、亮屏、最后交互时间等交互特征。
 - `watch`: Watch 腕部运动、心率、心率趋势等特征。
-- `audio`: POC 里存在音频特征，但当前统一链路的主决策不依赖它。
+- `audio`: POC 里保留的麦克风音频特征，用于噪音检测和调试验证；使用统一链路时无需关注该字段。
 
 成熟 App 接入时，关键是稳定产出 `FeatureWindow`，并按顺序喂给 `UnifiedDecisionEngine`。
 
@@ -102,9 +102,11 @@ Channel 是统一链路内部使用的一路可用信号:
 
 当前 POC 的 Watch App 前端页面只用于 debug 和授权/状态观察，没有做正式产品设计，不能直接作为成熟 App 的 Watch 端 UI。
 
-## 4. 麦克风和音频采集边界
+## 4. 可选: 麦克风噪音检测与音频播放兼容性
 
-POC 里保留了麦克风音频特征和噪音检测能力，主要用于调试和后续验证。当前统一降级主链路不依赖 `audio` channel，但集成成熟 App 时仍需要理解现有实现，因为它会影响 App 的音频 session。
+当前 unified 主链路只消费 Watch motion、Watch heart rate、Phone motion、Phone interaction 四路 channel，不消费 `FeatureWindow.audio`。如果成熟 App 使用统一链路，就无需关注麦克风噪音检测，也不需要接入 `LiveAudioProvider`、麦克风权限或下面这套音频 session 实现。
+
+下面内容只作为历史实现说明保留，适用于成熟 App 另外决定复用或继续验证 POC 里的麦克风噪音检测能力。
 
 当前 `LiveAudioProvider` 使用的是全双工语音处理方案:
 
@@ -115,14 +117,12 @@ POC 里保留了麦克风音频特征和噪音检测能力，主要用于调试�
 
 这意味着当前麦克风噪音检测不是单纯打开麦克风采样，而是依赖“本机输出 + 语音处理/回声消除 + 麦克风输入”的组合路径。它有助于验证播放污染、回声消除和后台音频 I/O 稳定性，但也会和正式 App 的助眠音乐播放产生耦合。
 
-接入成熟 App 时需要单独处理这类兼容性问题:
+如果要把这套麦克风噪音检测带进成熟 App，需要单独处理这类兼容性问题:
 
 - 正式播放器已经占用或配置了 `AVAudioSession` 时，不能假设 POC 的 `.playAndRecord` / `.voiceChat` 策略可以直接覆盖。
 - `voiceChat` 和 echo-cancelled input 可能改变播放路由、音质、音量、混音行为或其它后台音频的中断表现。
 - POC bundled playback 只是 debug 验证工具，不等同于正式助眠音乐播放链路。
 - 如果正式产品要同时播放音乐并启用麦克风特征，需要在产品播放器、音频 session 策略、后台能力和麦克风特征质量之间做兼容性验证。
-
-如果成熟 App 暂时不接入音频特征，可以保留统一链路当前的 phone / watch channel 判定，不需要把这套音频采集路径作为主结果前置条件。
 
 ## 5. 项目结构
 
@@ -379,7 +379,7 @@ UnifiedSessionAnalytics.exportPayload(from: bundles)
 
 - 先把 session、window、decision 三个概念接稳，再考虑完整诊断和评估。
 - Watch 实时通信依赖 Watch App，Watch App 生命周期要作为独立工程问题处理。
-- 麦克风音频特征当前走 `VoiceProcessingIO` 全双工语音处理路径；如果正式 App 同时播放助眠音乐，需要把音频 session、播放路由、混音/中断和特征质量作为兼容性问题验证。
+- 使用统一链路无需关注麦克风噪音检测；只有复用 POC 的 `LiveAudioProvider` 时，才需要处理 `VoiceProcessingIO` 全双工语音处理路径与正式助眠音乐播放的兼容性。
 - `confirmedAt` 是产品动作时间，不要用 `candidateAt` 触发动作。
 - 没有 Watch 时仍可用 phone profile 运行。
 - HealthKit truth 不是 live decision 前置条件。
