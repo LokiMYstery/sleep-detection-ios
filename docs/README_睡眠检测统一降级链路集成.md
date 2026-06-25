@@ -67,7 +67,7 @@ Channel 是统一链路内部使用的一路可用信号:
 - iPhone 和 Watch 都可用: `phoneInteraction+phoneMotion+watchHeartRate+watchMotion`。
 - 没有支持信号: `none`。
 
-统一降级的核心就是: 根据实际能力生成 profile，在这个 profile 内重新归一化权重，并继续完成判定。
+统一降级的核心就是: 为了解决不同用户、设备和授权状态下能力集合不一致的问题，根据实际能力生成 profile，在这个 profile 内重新归一化权重，并继续完成判定。
 
 ### UnifiedSleepDecision
 
@@ -187,7 +187,7 @@ engine.finalize(at: Date())
 
 ## 7. 统一降级链路怎么实现
 
-启动 session 时，engine 会根据设备能力生成 `capabilityProfile`:
+启动 session 时，engine 会根据 `Session.deviceCondition` 和 `Session.disabledFeatures` 生成 `capabilityProfile`:
 
 ```swift
 static func capabilityProfile(for session: Session) -> UnifiedCapabilityProfile
@@ -199,6 +199,8 @@ static func capabilityProfile(for session: Session) -> UnifiedCapabilityProfile
 - 有 Motion access 或 Watch，加入 `phoneInteraction`。
 - 有 Watch 且没有 `watchUnavailable` / `watchCompanionMissing`，加入 `watchMotion` 和 `watchHeartRate`。
 - 没有任何支持 channel，状态为 `unavailable`。
+
+这意味着“有权限/没权限”确实是统一降级要处理的核心场景之一，但实现上不只看权限，还会一起考虑是否配对 Watch、是否安装 companion，以及 provider 是否真的启动成功。需要注意的是，Watch 已配对但尚未完成手表端授权时，当前实现不一定会在启动阶段直接剔除 watch channel；更常见的是 watch channel 仍然属于 profile，但在拿不到 fresh watch 数据前不会贡献正向分。
 
 每个 profile 有自己的权重。默认 base weight:
 

@@ -1,6 +1,6 @@
 # Sleep Detection iOS POC
 
-这是一个用于验证睡眠检测与助眠音频自动停止能力的 iOS / watchOS POC。当前主链路是统一降级判定: 根据本次 session 实际可用的 iPhone 与 Apple Watch 信号生成 `UnifiedSleepDecision`，并在 `state == .confirmed` 时作为产品动作触发依据。
+这是一个用于验证睡眠检测与助眠音频自动停止能力的 iOS / watchOS POC。当前主链路是统一降级判定: 它主要用于处理不同用户、不同设备、不同授权状态下能力集合不一致的问题，例如有的用户有 Motion / Watch 权限，有的用户没有。引擎会根据本次 session 实际可用的 iPhone 与 Apple Watch 信号生成 `UnifiedSleepDecision`，并在 `state == .confirmed` 时作为产品动作触发依据。
 
 ## 当前集成入口
 
@@ -8,7 +8,7 @@
 
 [docs/README_睡眠检测统一降级链路集成.md](docs/README_睡眠检测统一降级链路集成.md)
 
-该文档说明了功能目标、`Session` / `FeatureWindow` / `UnifiedSleepDecision` 等基础概念、Watch App 依赖、统一降级链路实现、产品动作接入、调试边界和离线评估口径。
+该文档说明了功能目标、`Session` / `FeatureWindow` / `UnifiedSleepDecision` 等基础概念、Watch App 依赖、统一降级链路实现、不同权限/设备状态下的能力裁剪方式、产品动作接入、调试边界和离线评估口径。
 
 ## 文档说明
 
